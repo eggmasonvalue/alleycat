@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use alleycat_acp_bridge::AcpBridge;
+use alleycat_agy_bridge::AgyBridge;
 use alleycat_amp_bridge::AmpBridge;
 use alleycat_bridge_core::codex_resolver::{newest_codex_candidates_first, program_candidates};
 use alleycat_bridge_core::session::{Session, SessionRegistry, SessionRegistryConfig};
@@ -50,6 +51,7 @@ pub enum AgentKind {
     Hermes,
     Devin,
     Grok,
+    Agy,
     Shell,
 }
 
@@ -240,6 +242,18 @@ impl AgentManager {
         }
         let shell_bridge = shell_builder.build();
 
+        let mut agy_builder = AgyBridge::builder()
+            .agent_bin(PathBuf::from(&snapshot.agents.agy.bin))
+            .launcher(Arc::clone(&launcher))
+            .bypass_permissions(snapshot.agents.agy.dangerously_skip_permissions);
+        if let Some(ref home) = codex_home {
+            agy_builder = agy_builder.codex_home(home.clone());
+        }
+        if let Some(ref agent) = snapshot.agents.agy.agent {
+            agy_builder = agy_builder.agent(agent.clone());
+        }
+        let agy_bridge = agy_builder.build().await.context("building agy bridge")?;
+
         let mut bridges: HashMap<AgentKind, Arc<dyn Bridge>> = HashMap::new();
         bridges.insert(AgentKind::Pi, pi_bridge as Arc<dyn Bridge>);
         bridges.insert(AgentKind::Amp, amp_bridge as Arc<dyn Bridge>);
@@ -247,6 +261,7 @@ impl AgentManager {
         bridges.insert(AgentKind::Droid, droid_bridge as Arc<dyn Bridge>);
         bridges.insert(AgentKind::Devin, devin_bridge);
         bridges.insert(AgentKind::Grok, grok_bridge);
+        bridges.insert(AgentKind::Agy, agy_bridge as Arc<dyn Bridge>);
         bridges.insert(AgentKind::Shell, shell_bridge);
 
         let hermes_cfg = &snapshot.agents.hermes;
@@ -345,6 +360,7 @@ impl AgentManager {
                 "hermes" => self.hermes_available(&launch_env).await,
                 "devin" => self.devin_available(&launch_env),
                 "grok" => self.grok_available(&launch_env),
+                "agy" => self.agy_available(&launch_env),
                 "shell" => self.shell_available(),
                 _ => false,
             };
@@ -466,6 +482,7 @@ impl AgentManager {
             "hermes" => cfg.agents.hermes.enabled,
             "devin" => cfg.agents.devin.enabled,
             "grok" => cfg.agents.grok.enabled,
+            "agy" => cfg.agents.agy.enabled,
             "shell" => cfg.agents.shell.enabled,
             _ => false,
         }
@@ -981,6 +998,11 @@ impl AgentManager {
         cfg.agents.grok.enabled && program_available(env, &cfg.agents.grok.bin)
     }
 
+    fn agy_available(&self, env: &LaunchEnvironment) -> bool {
+        let cfg = self.config.load();
+        cfg.agents.agy.enabled && program_available(env, &cfg.agents.agy.bin)
+    }
+
     fn shell_available(&self) -> bool {
         let cfg = self.config.load();
         cfg.agents.shell.enabled && which::which(&cfg.agents.shell.shell_bin).is_ok()
@@ -1464,6 +1486,7 @@ fn agent_kind_from_str(name: &str) -> Option<AgentKind> {
         "hermes" => Some(AgentKind::Hermes),
         "devin" => Some(AgentKind::Devin),
         "grok" => Some(AgentKind::Grok),
+        "agy" => Some(AgentKind::Agy),
         "shell" => Some(AgentKind::Shell),
         _ => None,
     }
@@ -1479,6 +1502,7 @@ fn agent_kind_str(kind: AgentKind) -> &'static str {
         AgentKind::Hermes => "hermes",
         AgentKind::Devin => "devin",
         AgentKind::Grok => "grok",
+        AgentKind::Agy => "agy",
         AgentKind::Shell => "shell",
     }
 }
@@ -1494,6 +1518,7 @@ impl crate::config::AgentsConfig {
             AgentKind::Hermes => self.hermes.enabled,
             AgentKind::Devin => self.devin.enabled,
             AgentKind::Grok => self.grok.enabled,
+            AgentKind::Agy => self.agy.enabled,
             AgentKind::Shell => self.shell.enabled,
         }
     }

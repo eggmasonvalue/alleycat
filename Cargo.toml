@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/acp-bridge",
+    "crates/agy-bridge",
     "crates/alleycat",
     "crates/amp-bridge",
     "crates/bridge-conformance",
@@ -29,6 +30,7 @@ readme = "README.md"
 
 [workspace.dependencies]
 alleycat-acp-bridge = { path = "crates/acp-bridge", version = "0.1" }
+alleycat-agy-bridge = { path = "crates/agy-bridge", version = "0.1" }
 alleycat-bridge-core = { path = "crates/bridge-core", version = "0.1" }
 alleycat-amp-bridge = { path = "crates/amp-bridge", version = "0.1" }
 alleycat-codex-proto = { path = "crates/codex-proto", version = "0.1" }

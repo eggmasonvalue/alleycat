@@ -26,6 +26,7 @@ path = "src/bin/alleycat-startup.rs"
 
 [dependencies]
 alleycat-acp-bridge = { workspace = true }
+alleycat-agy-bridge = { workspace = true }
 alleycat-amp-bridge = { workspace = true }
 alleycat-bridge-core = { workspace = true }
 alleycat-claude-bridge = { workspace = true }

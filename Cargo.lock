@@ -71,6 +71,7 @@ name = "alleycat"
 version = "0.1.0"
 dependencies = [
  "alleycat-acp-bridge",
+ "alleycat-agy-bridge",
  "alleycat-amp-bridge",
  "alleycat-bridge-core",
  "alleycat-claude-bridge",
@@ -121,6 +122,29 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "alleycat-agy-bridge"
+version = "0.1.0"
+dependencies = [
+ "alleycat-bridge-core",
+ "alleycat-codex-proto",
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "dashmap",
+ "directories",
+ "pretty_assertions",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
  "tracing-subscriber",

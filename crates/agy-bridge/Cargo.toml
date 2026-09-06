@@ -1,0 +1,42 @@
+[package]
+name = "alleycat-agy-bridge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+description = "Codex app-server façade over Google Antigravity CLI (`agy`), used by the alleycat daemon."
+
+[package.metadata.dist]
+dist = false
+
+[[bin]]
+name = "alleycat-agy-bridge"
+path = "src/main.rs"
+
+[lib]
+name = "alleycat_agy_bridge"
+path = "src/lib.rs"
+
+[dependencies]
+alleycat-bridge-core = { workspace = true }
+alleycat-codex-proto = { workspace = true }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+dashmap = "6"
+directories = { workspace = true }
+rusqlite = { version = "0.31", features = ["bundled"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["io-std", "process"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }
+tempfile = { workspace = true }
