@@ -15,7 +15,7 @@ alleycat-acp-bridge = { workspace = true }
 alleycat-bridge-core = { workspace = true }
 anyhow.workspace = true
 async-trait.workspace = true
-rusqlite = { version = "0.31", features = ["bundled"] }
+rusqlite = { workspace = true }
 serde_json.workspace = true
 tokio.workspace = true
 tracing.workspace = true

@@ -71,6 +71,7 @@ pretty_assertions = "1"
 tempfile = "3"
 portable-pty = "0.9"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "gzip"] }
+rusqlite = { version = "0.32.1", features = ["bundled"] }
 tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
 url = "2"
 
