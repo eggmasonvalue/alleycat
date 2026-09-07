@@ -465,6 +465,7 @@ impl AgentManager {
             "hermes" => Some("hermes"),
             "devin" => Some("devin"),
             "grok" => Some("grok"),
+            "agy" => Some("agy"),
             "shell" => Some("shell"),
             _ => None,
         }

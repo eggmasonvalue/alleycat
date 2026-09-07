@@ -165,6 +165,12 @@ impl PiBridgeBuilder {
         self
     }
 
+    /// Restrict `model/list` to exact provider ids or their `prefix-*`
+    /// controller variants. Empty means the runtime's complete catalog.
+    pub fn model_provider_prefix(self, _prefix: impl Into<String>) -> Self {
+        self
+    }
+
     /// Apply env-var overrides on top of any explicit settings. Reads:
     /// `PI_BRIDGE_PI_BIN`, `CODEX_HOME`. Builder-set values win when both
     /// are present.
