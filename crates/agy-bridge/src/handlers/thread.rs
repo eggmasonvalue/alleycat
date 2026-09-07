@@ -271,6 +271,31 @@ pub async fn handle_thread_read(
     Ok(p::ThreadReadResponse { thread })
 }
 
+pub async fn handle_thread_turns_list(
+    state: &Arc<ConnectionState>,
+    params: p::ThreadTurnsListParams,
+) -> Result<p::ThreadTurnsListResponse, ThreadError> {
+    let recorded = state.recorded_turns(&params.thread_id);
+    let data = recorded
+        .into_iter()
+        .map(|r| p::Turn {
+            id: r.turn_id,
+            items: r.items,
+            items_view: p::default_items_view(),
+            status: r.status,
+            error: r.error,
+            started_at: Some(r.started_at),
+            completed_at: r.completed_at,
+            duration_ms: r.completed_at.map(|c| c.saturating_sub(r.started_at)),
+        })
+        .collect();
+    Ok(p::ThreadTurnsListResponse {
+        data,
+        next_cursor: None,
+        backwards_cursor: None,
+    })
+}
+
 pub async fn handle_thread_archive(
     state: &Arc<ConnectionState>,
     params: p::ThreadArchiveParams,

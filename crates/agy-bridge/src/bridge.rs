@@ -431,6 +431,13 @@ async fn dispatch_request(
                 .map_err(thread_to_rpc)?;
             to_value(resp)
         }
+        "thread/turns/list" => {
+            let typed: p::ThreadTurnsListParams = decode(params)?;
+            let resp = handlers::thread::handle_thread_turns_list(state, typed)
+                .await
+                .map_err(thread_to_rpc)?;
+            to_value(resp)
+        }
         "thread/archive" => {
             let typed: p::ThreadArchiveParams = decode(params)?;
             let resp = handlers::thread::handle_thread_archive(state, typed)

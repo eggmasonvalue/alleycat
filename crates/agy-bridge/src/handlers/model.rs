@@ -4,8 +4,8 @@
 //! agent profiles (`<agent>/<model>`) to enable multi-agent support without
 //! frontend changes.
 
-use std::path::Path;
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, LazyLock, Mutex};
 
 use alleycat_codex_proto as p;
 use serde_json::json;
@@ -16,6 +16,12 @@ pub const MODEL_PROVIDER: &str = "google";
 
 pub const DEFAULT_MODEL: &str = "gemini-3.7-flash-high";
 
+static CACHED_MODELS: LazyLock<Mutex<Option<Vec<DiscoveredModel>>>> =
+    LazyLock::new(|| Mutex::new(None));
+static CACHED_AGENTS: LazyLock<Mutex<Option<Vec<String>>>> =
+    LazyLock::new(|| Mutex::new(None));
+
+#[derive(Clone)]
 pub struct DiscoveredModel {
     pub id: String,
     pub name: String,
@@ -39,9 +45,9 @@ pub async fn handle_model_list(
     state: &Arc<ConnectionState>,
     _params: p::ModelListParams,
 ) -> p::ModelListResponse {
-    let agy_bin = state.agy_pool().agy_bin();
-    let stock_models = discover_models(agy_bin).await;
-    let custom_agents = discover_agents(agy_bin).await;
+    let agy_bin = state.agy_pool().agy_bin().to_path_buf();
+    let stock_models = get_or_refresh_models(&agy_bin).await;
+    let custom_agents = get_or_refresh_agents(&agy_bin).await;
 
     let mut data = Vec::new();
 
@@ -75,6 +81,24 @@ pub async fn handle_model_list(
         data,
         next_cursor: None,
     }
+}
+
+async fn get_or_refresh_models(agy_bin: &Path) -> Vec<DiscoveredModel> {
+    if let Some(cached) = CACHED_MODELS.lock().unwrap().clone() {
+        return cached;
+    }
+    let models = discover_models(agy_bin).await;
+    *CACHED_MODELS.lock().unwrap() = Some(models.clone());
+    models
+}
+
+async fn get_or_refresh_agents(agy_bin: &Path) -> Vec<String> {
+    if let Some(cached) = CACHED_AGENTS.lock().unwrap().clone() {
+        return cached;
+    }
+    let agents = discover_agents(agy_bin).await;
+    *CACHED_AGENTS.lock().unwrap() = Some(agents.clone());
+    agents
 }
 
 async fn discover_models(agy_bin: &Path) -> Vec<DiscoveredModel> {
