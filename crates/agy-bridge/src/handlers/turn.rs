@@ -91,6 +91,7 @@ pub async fn handle_turn_start(
         handle,
         events_rx,
         started_at,
+        params.input,
     ));
 
     Ok(p::TurnStartResponse { turn })
@@ -122,7 +123,10 @@ pub async fn handle_turn_interrupt(
     state: &Arc<ConnectionState>,
     params: p::TurnInterruptParams,
 ) -> Result<p::TurnInterruptResponse, TurnError> {
-    state.agy_pool().mark_idle(&params.thread_id).await;
+    if let Some(handle) = state.agy_pool().get(&params.thread_id).await {
+        handle.interrupt().await;
+    }
+    state.agy_pool().release(&params.thread_id).await;
     Ok(p::TurnInterruptResponse::default())
 }
 
@@ -134,10 +138,16 @@ async fn run_event_pump(
     _handle: Arc<AgyProcessHandle>,
     mut events_rx: broadcast::Receiver<AgyOutbound>,
     started_at: i64,
+    user_input: Vec<p::UserInput>,
 ) {
     let mut translator = EventTranslatorState::new(thread_id.clone(), turn_id.clone(), cwd);
-    let mut recorded_items = Vec::new();
+    let mut recorded_items = vec![p::ThreadItem::UserMessage {
+        id: Uuid::now_v7().to_string(),
+        content: user_input,
+    }];
     let mut terminal_seen = false;
+    let mut final_turn_status = p::TurnStatus::Completed;
+    let mut final_error = None;
 
     loop {
         let event = match events_rx.recv().await {
@@ -161,6 +171,10 @@ async fn run_event_pump(
             if let p::ServerNotification::ItemCompleted(ref n) = notif {
                 recorded_items.push(n.item.clone());
             }
+            if let p::ServerNotification::TurnCompleted(ref n) = notif {
+                final_turn_status = n.turn.status;
+                final_error = n.turn.error.clone();
+            }
 
             let method = notif_method(&notif);
             if state.should_emit(method) {
@@ -182,8 +196,8 @@ async fn run_event_pump(
             turn_id: turn_id.clone(),
             started_at,
             completed_at: Some(completed_at),
-            status: p::TurnStatus::Completed,
-            error: None,
+            status: final_turn_status,
+            error: final_error,
             items: recorded_items,
         },
     );

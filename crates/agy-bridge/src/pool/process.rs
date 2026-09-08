@@ -128,13 +128,41 @@ impl AgyProcessHandle {
         }
 
         if let Some(model) = resolved_model {
-            args.push("--model".to_string());
-            args.push(model);
-        }
+            // Strip any hardcoded effort suffix if present to avoid
+            // CLI crash when --effort is also passed.
+            let (base_model, embedded_effort) = if let Some(base) = model.strip_suffix("-high") {
+                (base.to_string(), Some("high"))
+            } else if let Some(base) = model.strip_suffix("-medium") {
+                (base.to_string(), Some("medium"))
+            } else if let Some(base) = model.strip_suffix("-low") {
+                (base.to_string(), Some("low"))
+            } else {
+                (model.clone(), None)
+            };
 
-        if let Some(ref effort) = config.effort {
-            args.push("--effort".to_string());
-            args.push(effort.clone());
+            args.push("--model".to_string());
+            args.push(base_model.clone());
+
+            // Only pass --effort if the model supports it.
+            // Models like Claude (e.g. claude-sonnet-4-6) crash if --effort is passed.
+            let model_supports_effort = !base_model.starts_with("claude");
+            if model_supports_effort {
+                let effort_to_pass = config
+                    .effort
+                    .as_deref()
+                    .or(embedded_effort);
+
+                if let Some(eff) = effort_to_pass {
+                    // For models like gpt-oss-120b that only support medium:
+                    if base_model.starts_with("gpt-oss") && eff != "medium" {
+                        args.push("--effort".to_string());
+                        args.push("medium".to_string());
+                    } else {
+                        args.push("--effort".to_string());
+                        args.push(eff.to_lowercase());
+                    }
+                }
+            }
         }
 
         if config.resume {
@@ -236,6 +264,25 @@ impl AgyProcessHandle {
         self.writer_tx
             .send(line)
             .map_err(|e| AgyProcessError::WriterFailed(e.to_string()))
+    }
+
+    pub async fn interrupt(&self) {
+        if let Some(pid) = self.pid {
+            #[cfg(unix)]
+            unsafe {
+                let _ = libc::kill(pid as libc::pid_t, libc::SIGINT);
+            }
+            #[cfg(not(unix))]
+            {
+                if let Some(ref mut child) = *self.tasks.child.lock().await {
+                    let _ = child.kill().await;
+                }
+            }
+        } else {
+            if let Some(ref mut child) = *self.tasks.child.lock().await {
+                let _ = child.kill().await;
+            }
+        }
     }
 
     pub async fn shutdown(&self) {

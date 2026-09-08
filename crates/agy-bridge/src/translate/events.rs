@@ -456,22 +456,41 @@ impl EventTranslatorState {
         }
 
         let is_success = result.is_success();
+        let is_interrupted = result.error.as_ref().map_or(false, |e| {
+            let s = match e {
+                serde_json::Value::String(s) => s.as_str(),
+                _ => "",
+            };
+            let lower = s.to_lowercase();
+            lower.contains("canceled") || lower.contains("cancelled") || lower.contains("interrupt")
+        });
+
+        let status = if is_interrupted {
+            TurnStatus::Interrupted
+        } else if is_success {
+            TurnStatus::Completed
+        } else {
+            TurnStatus::Failed
+        };
+
         let turn = Turn {
             id: self.turn_id.clone(),
             items: Vec::new(),
             items_view: alleycat_codex_proto::default_items_view(),
-            status: if is_success {
-                TurnStatus::Completed
-            } else {
-                TurnStatus::Failed
-            },
+            status,
             error: if is_success {
                 None
             } else {
                 Some(TurnError {
                     message: result
                         .response
-                        .unwrap_or_else(|| "agy turn failed".to_string()),
+                        .unwrap_or_else(|| {
+                            if is_interrupted {
+                                "turn interrupted".to_string()
+                            } else {
+                                "agy turn failed".to_string()
+                            }
+                        }),
                     codex_error_info: None,
                     additional_details: None,
                 })

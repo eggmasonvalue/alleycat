@@ -1,6 +1,7 @@
 //! Per-connection state for `agy-bridge`.
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex;
 
@@ -11,7 +12,9 @@ use alleycat_codex_proto::{
     ApprovalsReviewer, AskForApproval, InitializeCapabilities, JsonRpcMessage, ReasoningEffort,
     SandboxMode, ThreadItem, TurnError, TurnStatus,
 };
+use serde::{Deserialize, Serialize};
 
+use crate::handlers::model::DiscoveredModel;
 use crate::index::AgySessionRef;
 use crate::pool::AgyPool;
 
@@ -31,10 +34,13 @@ pub struct ConnectionState {
     thread_index: Arc<dyn ThreadIndexHandle>,
     launcher: Option<Arc<dyn ProcessLauncher>>,
     trust_persisted_cwd: bool,
+    codex_home: PathBuf,
+    cached_models: Mutex<Option<Vec<DiscoveredModel>>>,
+    cached_agents: Mutex<Option<Vec<String>>>,
     thread_logs: Mutex<HashMap<String, Vec<RecordedTurn>>>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RecordedTurn {
     pub turn_id: String,
     pub started_at: i64,
@@ -62,6 +68,7 @@ impl ConnectionState {
         agy_pool: Arc<AgyPool>,
         thread_index: Arc<dyn ThreadIndexHandle>,
         defaults: ThreadDefaults,
+        codex_home: PathBuf,
     ) -> Self {
         Self {
             defaults: Mutex::new(defaults),
@@ -70,6 +77,9 @@ impl ConnectionState {
             thread_index,
             launcher: None,
             trust_persisted_cwd: false,
+            codex_home,
+            cached_models: Mutex::new(None),
+            cached_agents: Mutex::new(None),
             thread_logs: Mutex::new(HashMap::new()),
         }
     }
@@ -81,6 +91,9 @@ impl ConnectionState {
         defaults: ThreadDefaults,
         launcher: Option<Arc<dyn ProcessLauncher>>,
         trust_persisted_cwd: bool,
+        codex_home: PathBuf,
+        seed_models: Option<Vec<DiscoveredModel>>,
+        seed_agents: Option<Vec<String>>,
     ) -> Self {
         Self {
             defaults: Mutex::new(defaults),
@@ -89,6 +102,9 @@ impl ConnectionState {
             thread_index,
             launcher,
             trust_persisted_cwd,
+            codex_home,
+            cached_models: Mutex::new(seed_models),
+            cached_agents: Mutex::new(seed_agents),
             thread_logs: Mutex::new(HashMap::new()),
         }
     }
@@ -147,6 +163,26 @@ impl ConnectionState {
         self.trust_persisted_cwd
     }
 
+    pub fn codex_home(&self) -> &Path {
+        &self.codex_home
+    }
+
+    pub fn get_cached_models(&self) -> Option<Vec<DiscoveredModel>> {
+        self.cached_models.lock().unwrap().clone()
+    }
+
+    pub fn set_cached_models(&self, models: Vec<DiscoveredModel>) {
+        *self.cached_models.lock().unwrap() = Some(models);
+    }
+
+    pub fn get_cached_agents(&self) -> Option<Vec<String>> {
+        self.cached_agents.lock().unwrap().clone()
+    }
+
+    pub fn set_cached_agents(&self, agents: Vec<String>) {
+        *self.cached_agents.lock().unwrap() = Some(agents);
+    }
+
     pub fn defaults(&self) -> ThreadDefaults {
         self.defaults.lock().unwrap().clone()
     }
@@ -158,11 +194,103 @@ impl ConnectionState {
 
     pub fn record_turn(&self, thread_id: &str, turn: RecordedTurn) {
         let mut logs = self.thread_logs.lock().unwrap();
-        logs.entry(thread_id.to_string()).or_default().push(turn);
+        let turns = logs.entry(thread_id.to_string()).or_default();
+        turns.push(turn);
+        let turns_clone = turns.clone();
+        drop(logs);
+
+        // Persist to disk: <codex_home>/agy_turns/<thread_id>.json
+        let turns_dir = self.codex_home.join("agy_turns");
+        if let Err(err) = std::fs::create_dir_all(&turns_dir) {
+            tracing::warn!(?err, path = %turns_dir.display(), "failed to create agy_turns dir");
+            return;
+        }
+        let file_path = turns_dir.join(format!("{thread_id}.json"));
+        if let Ok(json) = serde_json::to_string_pretty(&turns_clone) {
+            if let Err(err) = std::fs::write(&file_path, json) {
+                tracing::warn!(?err, path = %file_path.display(), "failed to persist agy turns to disk");
+            }
+        }
     }
 
     pub fn recorded_turns(&self, thread_id: &str) -> Vec<RecordedTurn> {
-        let logs = self.thread_logs.lock().unwrap();
+        let mut logs = self.thread_logs.lock().unwrap();
+        if let Some(turns) = logs.get(thread_id) {
+            if !turns.is_empty() {
+                return turns.clone();
+            }
+        }
+
+        // Try reading persisted turns from disk: <codex_home>/agy_turns/<thread_id>.json
+        let file_path = self.codex_home.join("agy_turns").join(format!("{thread_id}.json"));
+        if file_path.is_file() {
+            if let Ok(content) = std::fs::read_to_string(&file_path) {
+                if let Ok(turns) = serde_json::from_str::<Vec<RecordedTurn>>(&content) {
+                    logs.insert(thread_id.to_string(), turns.clone());
+                    return turns;
+                }
+            }
+        }
+
         logs.get(thread_id).cloned().unwrap_or_default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn persists_and_restores_turns_from_disk() {
+        let dir = tempdir().unwrap();
+        let codex_home = dir.path().to_path_buf();
+        let session = Arc::new(Session::new("agy", "test".into(), 64, 1 << 20));
+        let pool = Arc::new(AgyPool::new("agy"));
+        let index = alleycat_bridge_core::ThreadIndex::<AgySessionRef>::open_at(
+            codex_home.join("threads.json"),
+        )
+        .await
+        .unwrap();
+
+        let state = ConnectionState::new(
+            session,
+            pool,
+            index,
+            ThreadDefaults::default(),
+            codex_home.clone(),
+        );
+
+        let turn = RecordedTurn {
+            turn_id: "turn-test-1".to_string(),
+            started_at: 1000,
+            completed_at: Some(2000),
+            status: TurnStatus::Completed,
+            error: None,
+            items: vec![ThreadItem::AgentMessage {
+                id: "item-1".to_string(),
+                text: "Hello from agy!".to_string(),
+                phase: None,
+                memory_citation: None,
+            }],
+        };
+
+        state.record_turn("th-test", turn.clone());
+
+        // Check memory
+        let loaded_mem = state.recorded_turns("th-test");
+        assert_eq!(loaded_mem, vec![turn.clone()]);
+
+        // Check disk file exists
+        let disk_file = codex_home.join("agy_turns").join("th-test.json");
+        assert!(disk_file.is_file());
+
+        // Clear in-memory log to simulate reconnection/restart
+        state.thread_logs.lock().unwrap().clear();
+        assert!(state.thread_logs.lock().unwrap().is_empty());
+
+        // Call recorded_turns: should restore from disk!
+        let loaded_disk = state.recorded_turns("th-test");
+        assert_eq!(loaded_disk, vec![turn]);
     }
 }

@@ -139,6 +139,7 @@ dependencies = [
  "chrono",
  "dashmap",
  "directories",
+ "libc",
  "pretty_assertions",
  "rusqlite",
  "serde",

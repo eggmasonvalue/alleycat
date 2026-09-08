@@ -97,6 +97,10 @@ impl AgyPool {
         &self.policy
     }
 
+    pub fn launcher(&self) -> &Arc<dyn ProcessLauncher> {
+        &self.launcher
+    }
+
     pub async fn acquire_for_new_thread(
         &self,
         cwd: &Path,

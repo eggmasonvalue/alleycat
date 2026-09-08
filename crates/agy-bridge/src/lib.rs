@@ -8,5 +8,6 @@ pub mod state;
 pub mod translate;
 
 pub use bridge::{AgyBridge, AgyBridgeBuilder};
+pub use handlers::model::DiscoveredModel;
 pub use index::AgySessionRef;
 pub use pool::{AgyPool, PoolPolicy};

@@ -125,11 +125,37 @@ pub async fn handle_thread_resume(
     state: &Arc<ConnectionState>,
     params: p::ThreadResumeParams,
 ) -> Result<p::ThreadResumeResponse, ThreadError> {
-    let entry = state
-        .thread_index()
-        .lookup(&params.thread_id)
-        .await
-        .ok_or_else(|| ThreadError::NotFound(params.thread_id.clone()))?;
+    let entry = match state.thread_index().lookup(&params.thread_id).await {
+        Some(e) => e,
+        None => {
+            let cwd_str = resolve_cwd(params.cwd.as_deref())
+                .unwrap_or_else(|_| PathBuf::from("/tmp"))
+                .to_string_lossy()
+                .into_owned();
+            let now_ms = now_unix_millis();
+            let entry = IndexEntry {
+                thread_id: params.thread_id.clone(),
+                cwd: cwd_str,
+                name: None,
+                preview: String::new(),
+                created_at: now_ms,
+                updated_at: now_ms,
+                archived: false,
+                forked_from_id: None,
+                model_provider: "google".to_string(),
+                source: p::ThreadSourceKind::AppServer,
+                metadata: AgySessionRef {
+                    agy_session_id: params.thread_id.clone(),
+                    parent_conversation_id: None,
+                    nesting_depth: 0,
+                    status: "ACTIVE".to_string(),
+                    step_count: 0,
+                },
+            };
+            let _ = state.thread_index().insert(entry.clone()).await;
+            entry
+        }
+    };
 
     let cwd = PathBuf::from(&entry.cwd);
     let defaults = state.defaults();
@@ -243,11 +269,31 @@ pub async fn handle_thread_read(
     state: &Arc<ConnectionState>,
     params: p::ThreadReadParams,
 ) -> Result<p::ThreadReadResponse, ThreadError> {
-    let entry = state
-        .thread_index()
-        .lookup(&params.thread_id)
-        .await
-        .ok_or_else(|| ThreadError::NotFound(params.thread_id.clone()))?;
+    let entry = match state.thread_index().lookup(&params.thread_id).await {
+        Some(e) => e,
+        None => {
+            let now_ms = now_unix_millis();
+            IndexEntry {
+                thread_id: params.thread_id.clone(),
+                cwd: "/tmp".to_string(),
+                name: None,
+                preview: String::new(),
+                created_at: now_ms,
+                updated_at: now_ms,
+                archived: false,
+                forked_from_id: None,
+                model_provider: "google".to_string(),
+                source: p::ThreadSourceKind::AppServer,
+                metadata: AgySessionRef {
+                    agy_session_id: params.thread_id.clone(),
+                    parent_conversation_id: None,
+                    nesting_depth: 0,
+                    status: "ACTIVE".to_string(),
+                    step_count: 0,
+                },
+            }
+        }
+    };
 
     let mut thread = entry_to_thread(&entry);
     if params.include_turns {

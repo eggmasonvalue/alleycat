@@ -32,6 +32,8 @@ pub struct AgyBridge {
     launcher: Arc<dyn ProcessLauncher>,
     per_conn: DashMap<String, Arc<ConnectionState>>,
     trust_persisted_cwd: bool,
+    seed_models: Option<Vec<crate::handlers::model::DiscoveredModel>>,
+    seed_agents: Option<Vec<String>>,
 }
 
 impl std::fmt::Debug for AgyBridge {
@@ -78,6 +80,9 @@ impl AgyBridge {
             ThreadDefaults::default(),
             Some(Arc::clone(&self.launcher)),
             self.trust_persisted_cwd,
+            self.codex_home.clone(),
+            self.seed_models.clone(),
+            self.seed_agents.clone(),
         ));
         let entry = self
             .per_conn
@@ -101,6 +106,8 @@ pub struct AgyBridgeBuilder {
     bypass_permissions: bool,
     trust_persisted_cwd: bool,
     summaries_db_override: Option<PathBuf>,
+    seed_models: Option<Vec<crate::handlers::model::DiscoveredModel>>,
+    seed_agents: Option<Vec<String>>,
 }
 
 impl Default for AgyBridgeBuilder {
@@ -115,6 +122,8 @@ impl Default for AgyBridgeBuilder {
             bypass_permissions: true,
             trust_persisted_cwd: false,
             summaries_db_override: None,
+            seed_models: None,
+            seed_agents: None,
         }
     }
 }
@@ -162,6 +171,16 @@ impl AgyBridgeBuilder {
 
     pub fn summaries_db_override(mut self, db: PathBuf) -> Self {
         self.summaries_db_override = Some(db);
+        self
+    }
+
+    pub fn seed_models(mut self, models: Vec<crate::handlers::model::DiscoveredModel>) -> Self {
+        self.seed_models = Some(models);
+        self
+    }
+
+    pub fn seed_agents(mut self, agents: Vec<String>) -> Self {
+        self.seed_agents = Some(agents);
         self
     }
 
@@ -238,6 +257,8 @@ impl AgyBridgeBuilder {
             launcher,
             per_conn: DashMap::new(),
             trust_persisted_cwd: self.trust_persisted_cwd,
+            seed_models: self.seed_models,
+            seed_agents: self.seed_agents,
         }))
     }
 }
