@@ -173,11 +173,35 @@ impl AgyProcessHandle {
         args.push("--add-dir".to_string());
         args.push(config.cwd.to_string_lossy().to_string());
 
-        let spec_args: Vec<OsString> = args.into_iter().map(OsString::from).collect();
+        // Force line buffering for stdio pipes on Unix if stdbuf is available,
+        // preventing agy output from being held in libc's 4KB block buffer.
+        #[cfg(unix)]
+        let (program, spec_args) = {
+            let stdbuf_path = if Path::new("/usr/bin/stdbuf").exists() {
+                Some(PathBuf::from("/usr/bin/stdbuf"))
+            } else if Path::new("/bin/stdbuf").exists() {
+                Some(PathBuf::from("/bin/stdbuf"))
+            } else {
+                None
+            };
+            if let Some(stdbuf) = stdbuf_path {
+                let mut full_args = vec![
+                    OsString::from("-oL"),
+                    OsString::from("-eL"),
+                    config.agy_bin.clone().into_os_string(),
+                ];
+                full_args.extend(args.into_iter().map(OsString::from));
+                (stdbuf, full_args)
+            } else {
+                (config.agy_bin.clone(), args.into_iter().map(OsString::from).collect())
+            }
+        };
+        #[cfg(not(unix))]
+        let (program, spec_args) = (config.agy_bin.clone(), args.into_iter().map(OsString::from).collect());
 
         let spec = ProcessSpec {
             role: ProcessRole::Agent,
-            program: config.agy_bin.clone(),
+            program,
             args: spec_args,
             cwd: Some(config.cwd.clone()),
             env: Vec::new(),

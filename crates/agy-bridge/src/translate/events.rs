@@ -481,16 +481,25 @@ impl EventTranslatorState {
             error: if is_success {
                 None
             } else {
+                let error_message = result
+                    .error
+                    .as_ref()
+                    .and_then(|v| match v {
+                        serde_json::Value::String(s) if !s.is_empty() => Some(s.clone()),
+                        other if !other.is_null() => Some(other.to_string()),
+                        _ => None,
+                    })
+                    .or_else(|| result.response.filter(|r| !r.is_empty()))
+                    .unwrap_or_else(|| {
+                        if is_interrupted {
+                            "turn interrupted".to_string()
+                        } else {
+                            "agy turn failed".to_string()
+                        }
+                    });
+
                 Some(TurnError {
-                    message: result
-                        .response
-                        .unwrap_or_else(|| {
-                            if is_interrupted {
-                                "turn interrupted".to_string()
-                            } else {
-                                "agy turn failed".to_string()
-                            }
-                        }),
+                    message: error_message,
                     codex_error_info: None,
                     additional_details: None,
                 })
