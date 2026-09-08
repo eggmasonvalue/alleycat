@@ -194,7 +194,19 @@ impl ConnectionState {
 
     pub fn record_turn(&self, thread_id: &str, turn: RecordedTurn) {
         let mut logs = self.thread_logs.lock().unwrap();
-        let turns = logs.entry(thread_id.to_string()).or_default();
+        let turns = logs.entry(thread_id.to_string()).or_insert_with(|| {
+            // Load existing persisted turns from disk if present so past turns
+            // are preserved across server restarts and reconnections!
+            let file_path = self.codex_home.join("agy_turns").join(format!("{thread_id}.json"));
+            if file_path.is_file() {
+                if let Ok(content) = std::fs::read_to_string(&file_path) {
+                    if let Ok(existing) = serde_json::from_str::<Vec<RecordedTurn>>(&content) {
+                        return existing;
+                    }
+                }
+            }
+            Vec::new()
+        });
         turns.push(turn);
         let turns_clone = turns.clone();
         drop(logs);
@@ -291,6 +303,31 @@ mod tests {
 
         // Call recorded_turns: should restore from disk!
         let loaded_disk = state.recorded_turns("th-test");
-        assert_eq!(loaded_disk, vec![turn]);
+        assert_eq!(loaded_disk, vec![turn.clone()]);
+
+        // Add a second turn after memory was cleared (simulating another session turn)
+        let turn2 = RecordedTurn {
+            turn_id: "turn-test-2".to_string(),
+            started_at: 3000,
+            completed_at: Some(4000),
+            status: TurnStatus::Completed,
+            error: None,
+            items: vec![ThreadItem::AgentMessage {
+                id: "item-2".to_string(),
+                text: "Second turn reply".to_string(),
+                phase: None,
+                memory_citation: None,
+            }],
+        };
+        // Clear memory again before recording turn 2
+        state.thread_logs.lock().unwrap().clear();
+        state.record_turn("th-test", turn2.clone());
+
+        // Both turns must be present on disk!
+        state.thread_logs.lock().unwrap().clear();
+        let both_turns = state.recorded_turns("th-test");
+        assert_eq!(both_turns.len(), 2);
+        assert_eq!(both_turns[0], turn);
+        assert_eq!(both_turns[1], turn2);
     }
 }
