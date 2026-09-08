@@ -57,6 +57,11 @@ pub async fn handle_turn_start(
     let events_rx = handle.subscribe();
 
     handle
+        .wait_for_init(crate::pool::DEFAULT_INIT_TIMEOUT)
+        .await
+        .map_err(|e| TurnError::AgyProcess(e.to_string()))?;
+
+    handle
         .send_prompt(&prompt)
         .map_err(|e| TurnError::AgyProcess(e.to_string()))?;
 
