@@ -135,6 +135,9 @@ fn filter_models_by_enabled_models(models: Vec<PiAvailableModel>) -> Vec<PiAvail
     let Some(patterns) = enabled_model_patterns_from_settings() else {
         return models;
     };
+    if patterns.is_empty() {
+        return models;
+    }
     let filtered: Vec<PiAvailableModel> = models
         .iter()
         .filter(|model| model_matches_enabled_patterns(model, &patterns))
