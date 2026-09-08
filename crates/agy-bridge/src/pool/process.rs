@@ -150,18 +150,29 @@ impl AgyProcessHandle {
                 let effort_to_pass = config
                     .effort
                     .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
                     .or(embedded_effort);
 
-                if let Some(eff) = effort_to_pass {
-                    // For models like gpt-oss-120b that only support medium:
-                    if base_model.starts_with("gpt-oss") && eff != "medium" {
-                        args.push("--effort".to_string());
-                        args.push("medium".to_string());
-                    } else {
-                        args.push("--effort".to_string());
-                        args.push(eff.to_lowercase());
+                let eff = match effort_to_pass {
+                    Some(e) => {
+                        if base_model.starts_with("gpt-oss") && e != "medium" {
+                            "medium"
+                        } else {
+                            e
+                        }
                     }
-                }
+                    None => {
+                        if base_model.starts_with("gpt-oss") {
+                            "medium"
+                        } else {
+                            "high"
+                        }
+                    }
+                };
+
+                args.push("--effort".to_string());
+                args.push(eff.to_lowercase());
             }
         }
 

@@ -50,7 +50,8 @@ pub async fn handle_thread_start(
     let defaults = state.defaults();
 
     let model = normalize_agy_model(params.model.clone().or_else(|| defaults.model.clone()));
-    let effort = defaults.reasoning_effort.map(|e| format!("{e:?}").to_lowercase());
+    let reasoning_effort = effort_from_params(&params.additional).or(defaults.reasoning_effort);
+    let effort = reasoning_effort.map(|e| format!("{e:?}").to_lowercase());
 
     let (thread_id, _handle) = state
         .agy_pool()
@@ -117,7 +118,7 @@ pub async fn handle_thread_start(
         sandbox,
         permission_profile: params.permission_profile.or_else(|| Some(default_permission_profile())),
         active_permission_profile: None,
-        reasoning_effort: defaults.reasoning_effort.or(Some(p::ReasoningEffort::High)),
+        reasoning_effort: reasoning_effort.or(Some(p::ReasoningEffort::High)),
     })
 }
 
@@ -430,5 +431,24 @@ fn sandbox_value(mode: Option<p::SandboxMode>) -> p::SandboxPolicy {
         Some(p::SandboxMode::WorkspaceWrite) => serde_json::json!({ "type": "workspaceWrite" }),
         Some(p::SandboxMode::DangerFullAccess) => serde_json::json!({ "type": "dangerFullAccess" }),
         None => serde_json::json!({ "type": "dangerFullAccess" }),
+    }
+}
+
+fn effort_from_params(
+    additional: &std::collections::HashMap<String, serde_json::Value>,
+) -> Option<p::ReasoningEffort> {
+    additional
+        .get("reasoningEffort")
+        .or_else(|| additional.get("effort"))
+        .and_then(parse_effort)
+}
+
+fn parse_effort(value: &serde_json::Value) -> Option<p::ReasoningEffort> {
+    match value.as_str()? {
+        "minimal" => Some(p::ReasoningEffort::Minimal),
+        "low" => Some(p::ReasoningEffort::Low),
+        "medium" => Some(p::ReasoningEffort::Medium),
+        "high" => Some(p::ReasoningEffort::High),
+        _ => None,
     }
 }
