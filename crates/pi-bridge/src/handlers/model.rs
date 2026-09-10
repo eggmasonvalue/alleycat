@@ -53,7 +53,7 @@ async fn fetch_models_via_pool(state: &Arc<ConnectionState>) -> Vec<PiAvailableM
     let handle = match state.pi_pool().acquire_utility(None).await {
         Ok(h) => h,
         Err(err) => {
-            tracing::warn!(%err, "model/list: failed to acquire utility pi handle");
+            tracing::warn!(err = ?err, "model/list: failed to acquire utility pi handle");
             return Vec::new();
         }
     };
