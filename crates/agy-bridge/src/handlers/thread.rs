@@ -121,7 +121,7 @@ pub async fn handle_thread_start(
         sandbox,
         permission_profile: params.permission_profile.or_else(|| Some(default_permission_profile())),
         active_permission_profile: None,
-        reasoning_effort: reasoning_effort.or(Some(p::ReasoningEffort::High)),
+        reasoning_effort: reasoning_effort.or(Some(p::ReasoningEffort::Medium)),
     })
 }
 
@@ -203,7 +203,20 @@ pub async fn handle_thread_resume(
         .map_err(ThreadError::pool)?;
 
     let mut thread = entry_to_thread(&entry);
-    let recorded = state.recorded_turns(&params.thread_id);
+    let mut recorded = state.recorded_turns(&params.thread_id);
+    let mut updated_any = false;
+    for r in &mut recorded {
+        if r.status == p::TurnStatus::InProgress && r.completed_at.is_none() {
+            r.status = p::TurnStatus::Interrupted;
+            r.completed_at = Some(now_unix_millis());
+            updated_any = true;
+        }
+    }
+    if updated_any {
+        for r in &recorded {
+            state.record_or_update_turn(&params.thread_id, r.clone());
+        }
+    }
     if !recorded.is_empty() {
         thread.turns = recorded
             .into_iter()
@@ -248,7 +261,7 @@ pub async fn handle_thread_resume(
         sandbox,
         permission_profile: params.permission_profile.or_else(|| Some(default_permission_profile())),
         active_permission_profile: None,
-        reasoning_effort: reasoning_effort.or(Some(p::ReasoningEffort::High)),
+        reasoning_effort: reasoning_effort.or(Some(p::ReasoningEffort::Medium)),
     })
 }
 
@@ -476,6 +489,11 @@ fn effort_from_params(
     additional
         .get("reasoningEffort")
         .or_else(|| additional.get("effort"))
+        .or_else(|| {
+            additional.get("additional").and_then(|v| {
+                v.get("reasoningEffort").or_else(|| v.get("effort"))
+            })
+        })
         .and_then(parse_effort)
 }
 

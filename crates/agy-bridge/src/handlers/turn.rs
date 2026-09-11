@@ -8,6 +8,7 @@ use thiserror::Error;
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
+use crate::handlers::model::normalize_agy_model_id;
 use crate::pool::AgyProcessHandle;
 use crate::pool::agy_protocol::AgyOutbound;
 use crate::state::{ConnectionState, RecordedTurn};
@@ -47,10 +48,12 @@ pub async fn handle_turn_start(
             if let Some(entry) = state.thread_index().lookup(&params.thread_id).await {
                 let cwd = std::path::PathBuf::from(&entry.cwd);
                 let defaults = state.defaults();
-                let effort = defaults
-                    .reasoning_effort
+                let effort = params
+                    .effort
                     .map(|e| format!("{e:?}").to_lowercase())
+                    .or_else(|| defaults.reasoning_effort.map(|e| format!("{e:?}").to_lowercase()))
                     .or_else(|| entry.metadata.effort.clone());
+                let spawn_model = params.model.as_deref().map(normalize_agy_model_id);
                 let agy_session_id = entry.metadata.agy_session_id.clone();
                 state
                     .agy_pool()
@@ -58,7 +61,7 @@ pub async fn handle_turn_start(
                         &params.thread_id,
                         Some(&agy_session_id),
                         &cwd,
-                        None,
+                        spawn_model,
                         effort,
                     )
                     .await
@@ -74,6 +77,43 @@ pub async fn handle_turn_start(
 
     let turn_id = Uuid::now_v7().to_string();
     let started_at = now_unix_millis();
+
+    if let Some(mut entry) = state.thread_index().lookup(&params.thread_id).await {
+        let mut changed = false;
+        if let Some(eff) = params.effort {
+            let eff_str = format!("{eff:?}").to_lowercase();
+            if entry.metadata.effort.as_deref() != Some(&eff_str) {
+                entry.metadata.effort = Some(eff_str);
+                changed = true;
+            }
+        }
+        if let Some(ref m) = params.model {
+            let norm = normalize_agy_model_id(m);
+            if entry.metadata.model.as_deref() != Some(&norm) {
+                entry.metadata.model = Some(norm);
+                changed = true;
+            }
+        }
+        if changed {
+            let _ = state.thread_index().insert(entry).await;
+        }
+    }
+
+    let initial_user_item = p::ThreadItem::UserMessage {
+        id: Uuid::now_v7().to_string(),
+        content: params.input.clone(),
+    };
+    state.record_or_update_turn(
+        &params.thread_id,
+        RecordedTurn {
+            turn_id: turn_id.clone(),
+            started_at,
+            completed_at: None,
+            status: p::TurnStatus::InProgress,
+            error: None,
+            items: vec![initial_user_item],
+        },
+    );
 
     let _ = state.agy_pool().mark_active(&params.thread_id).await;
     let events_rx = handle.subscribe();
@@ -178,6 +218,45 @@ pub async fn handle_turn_interrupt(
     if let Some(handle) = state.agy_pool().get(&params.thread_id).await {
         handle.interrupt().await;
     }
+    let mut recorded = state.recorded_turns(&params.thread_id);
+    let mut last_turn_id = None;
+    if let Some(last) = recorded.last_mut() {
+        if last.status == p::TurnStatus::InProgress {
+            last.status = p::TurnStatus::Interrupted;
+            last.completed_at = Some(now_unix_millis());
+            last_turn_id = Some(last.turn_id.clone());
+            state.record_or_update_turn(&params.thread_id, last.clone());
+        }
+    }
+    state.agy_pool().release(&params.thread_id).await;
+
+    if state.should_emit("turn/completed") {
+        let turn_id = if !params.turn_id.trim().is_empty() {
+            params.turn_id.clone()
+        } else {
+            last_turn_id.unwrap_or_default()
+        };
+        let turn = p::Turn {
+            id: turn_id,
+            items: Vec::new(),
+            items_view: p::default_items_view(),
+            status: p::TurnStatus::Interrupted,
+            error: Some(p::TurnError {
+                message: "turn interrupted by user".to_string(),
+                codex_error_info: None,
+                additional_details: None,
+            }),
+            started_at: None,
+            completed_at: Some(now_unix_millis()),
+            duration_ms: None,
+        };
+        state.send(notification_frame(p::ServerNotification::TurnCompleted(
+            p::TurnCompletedNotification {
+                thread_id: params.thread_id.clone(),
+                turn,
+            },
+        )));
+    }
     Ok(p::TurnInterruptResponse::default())
 }
 
@@ -221,6 +300,17 @@ async fn run_event_pump(
         for notif in notifications {
             if let p::ServerNotification::ItemCompleted(ref n) = notif {
                 recorded_items.push(n.item.clone());
+                state.record_or_update_turn(
+                    &thread_id,
+                    RecordedTurn {
+                        turn_id: turn_id.clone(),
+                        started_at,
+                        completed_at: None,
+                        status: p::TurnStatus::InProgress,
+                        error: None,
+                        items: recorded_items.clone(),
+                    },
+                );
             }
             if let p::ServerNotification::TurnCompleted(ref n) = notif {
                 final_turn_status = n.turn.status;
@@ -241,7 +331,7 @@ async fn run_event_pump(
     let completed_at = now_unix_millis();
     let duration_ms = completed_at.saturating_sub(started_at);
 
-    state.record_turn(
+    state.record_or_update_turn(
         &thread_id,
         RecordedTurn {
             turn_id: turn_id.clone(),

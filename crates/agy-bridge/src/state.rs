@@ -192,7 +192,7 @@ impl ConnectionState {
         f(&mut guard);
     }
 
-    pub fn record_turn(&self, thread_id: &str, turn: RecordedTurn) {
+    pub fn record_or_update_turn(&self, thread_id: &str, turn: RecordedTurn) {
         let mut logs = self.thread_logs.lock().unwrap();
         let turns = logs.entry(thread_id.to_string()).or_insert_with(|| {
             // Load existing persisted turns from disk if present so past turns
@@ -207,7 +207,11 @@ impl ConnectionState {
             }
             Vec::new()
         });
-        turns.push(turn);
+        if let Some(pos) = turns.iter().position(|t| t.turn_id == turn.turn_id) {
+            turns[pos] = turn;
+        } else {
+            turns.push(turn);
+        }
         let turns_clone = turns.clone();
         drop(logs);
 
@@ -223,6 +227,10 @@ impl ConnectionState {
                 tracing::warn!(?err, path = %file_path.display(), "failed to persist agy turns to disk");
             }
         }
+    }
+
+    pub fn record_turn(&self, thread_id: &str, turn: RecordedTurn) {
+        self.record_or_update_turn(thread_id, turn);
     }
 
     pub fn recorded_turns(&self, thread_id: &str) -> Vec<RecordedTurn> {
