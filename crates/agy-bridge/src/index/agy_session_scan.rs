@@ -19,6 +19,10 @@ pub struct AgySessionInfo {
     pub parent_conversation_id: Option<String>,
     pub nesting_depth: i32,
     pub status: String,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub effort: Option<String>,
 }
 
 pub fn default_agy_summaries_db() -> Option<PathBuf> {
@@ -48,6 +52,14 @@ pub fn read_sessions(path: &Path) -> Result<Vec<AgySessionInfo>> {
     )
     .with_context(|| format!("opening agy summaries db at {}", path.display()))?;
 
+    let models_map: std::collections::HashMap<String, String> = path
+        .parent()
+        .map(|p| p.join("conversation_models.json"))
+        .filter(|p| p.is_file())
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+
     let mut stmt = conn.prepare(
         "SELECT conversation_id, title, preview, step_count, last_modified_time, \
                 workspace_uris, parent_conversation_id, nesting_depth, status \
@@ -55,6 +67,7 @@ pub fn read_sessions(path: &Path) -> Result<Vec<AgySessionInfo>> {
          ORDER BY last_modified_time DESC",
     )?;
 
+    let base_dir = path.parent();
     let rows = stmt.query_map([], |row| {
         let conversation_id: String = row.get(0)?;
         let title: String = row.get(1)?;
@@ -74,6 +87,14 @@ pub fn read_sessions(path: &Path) -> Result<Vec<AgySessionInfo>> {
             Some(raw_parent.trim().to_string())
         };
 
+        let raw_model = models_map.get(&conversation_id).cloned().or_else(|| {
+            read_conversation_model_from_disk(base_dir, &conversation_id)
+        });
+        let (model, effort) = raw_model
+            .as_deref()
+            .map(parse_model_and_effort)
+            .unwrap_or((None, None));
+
         Ok(AgySessionInfo {
             conversation_id,
             title,
@@ -84,6 +105,8 @@ pub fn read_sessions(path: &Path) -> Result<Vec<AgySessionInfo>> {
             parent_conversation_id,
             nesting_depth,
             status,
+            model,
+            effort,
         })
     })?;
 
@@ -105,6 +128,57 @@ fn parse_timestamp_ms(raw: &str) -> i64 {
         }
     }
     chrono::Utc::now().timestamp_millis()
+}
+
+pub fn parse_model_and_effort(raw: &str) -> (Option<String>, Option<String>) {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return (None, None);
+    }
+    if let Some(base) = trimmed.strip_suffix("-high") {
+        (Some(base.to_string()), Some("high".to_string()))
+    } else if let Some(base) = trimmed.strip_suffix("-medium") {
+        (Some(base.to_string()), Some("medium".to_string()))
+    } else if let Some(base) = trimmed.strip_suffix("-low") {
+        (Some(base.to_string()), Some("low".to_string()))
+    } else {
+        (Some(trimmed.to_string()), None)
+    }
+}
+
+pub fn read_conversation_model_from_disk(base: Option<&Path>, conv_id: &str) -> Option<String> {
+    let conv_db = base?.join("conversations").join(format!("{conv_id}.db"));
+    if !conv_db.is_file() {
+        return None;
+    }
+    let conn = Connection::open_with_flags(
+        &conv_db,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+    )
+    .ok()?;
+    let mut stmt = conn
+        .prepare("SELECT data FROM executor_metadata ORDER BY idx DESC LIMIT 1")
+        .ok()?;
+    let blob: Vec<u8> = stmt.query_row([], |row| row.get(0)).ok()?;
+    extract_model_from_blob(&blob)
+}
+
+fn extract_model_from_blob(blob: &[u8]) -> Option<String> {
+    for prefix in [&b"gemini-"[..], &b"claude-"[..], &b"gpt-oss-"[..]] {
+        if let Some(pos) = blob.windows(prefix.len()).position(|w| w == prefix) {
+            let slice = &blob[pos..];
+            let len = slice
+                .iter()
+                .take_while(|&&b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.')
+                .count();
+            if len > prefix.len() {
+                if let Ok(s) = std::str::from_utf8(&slice[..len]) {
+                    return Some(s.to_string());
+                }
+            }
+        }
+    }
+    None
 }
 
 fn parse_workspace_cwd(raw: &str) -> String {
@@ -171,5 +245,48 @@ mod tests {
         assert_eq!(s.nesting_depth, 1);
         assert_eq!(s.status, "ACTIVE");
         assert!(s.last_modified_ms > 0);
+    }
+
+    #[test]
+    fn parses_model_and_effort_correctly() {
+        assert_eq!(
+            parse_model_and_effort("gemini-3.8-flash-high"),
+            (Some("gemini-3.8-flash".to_string()), Some("high".to_string()))
+        );
+        assert_eq!(
+            parse_model_and_effort("gemini-3.7-flash-medium"),
+            (Some("gemini-3.7-flash".to_string()), Some("medium".to_string()))
+        );
+        assert_eq!(
+            parse_model_and_effort("gemini-3.1-pro-low"),
+            (Some("gemini-3.1-pro".to_string()), Some("low".to_string()))
+        );
+        assert_eq!(
+            parse_model_and_effort("claude-sonnet-4-6"),
+            (Some("claude-sonnet-4-6".to_string()), None)
+        );
+        assert_eq!(
+            parse_model_and_effort("gpt-oss-120b-medium"),
+            (Some("gpt-oss-120b".to_string()), Some("medium".to_string()))
+        );
+        assert_eq!(parse_model_and_effort(""), (None, None));
+    }
+
+    #[test]
+    fn extracts_model_from_raw_binary_blob() {
+        let blob = b"\x08\x04\x12\x15gemini-3.8-flash-high\x18\x01";
+        assert_eq!(
+            extract_model_from_blob(blob),
+            Some("gemini-3.8-flash-high".to_string())
+        );
+
+        let claude_blob = b"\x00\x00claude-sonnet-4-6\x10\x02";
+        assert_eq!(
+            extract_model_from_blob(claude_blob),
+            Some("claude-sonnet-4-6".to_string())
+        );
+
+        let empty = b"\x00\x01\x02";
+        assert_eq!(extract_model_from_blob(empty), None);
     }
 }

@@ -72,6 +72,8 @@ pub enum AgyOutbound {
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct AgyInitData {
     #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
     pub cwd: Option<String>,
     #[serde(default)]
     pub tools: Vec<String>,

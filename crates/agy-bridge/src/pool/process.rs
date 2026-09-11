@@ -25,6 +25,7 @@ pub const DEFAULT_INIT_TIMEOUT: Duration = Duration::from_secs(30);
 #[derive(Debug, Clone)]
 pub struct AgySpawnConfig {
     pub thread_id: String,
+    pub agy_session_id: Option<String>,
     pub cwd: PathBuf,
     pub agy_bin: PathBuf,
     pub model: Option<String>,
@@ -44,28 +45,37 @@ pub enum AgyProcessError {
     WriterFailed(String),
 }
 
+#[derive(Debug, Clone)]
+pub struct AgyInitPayload {
+    pub conversation_id: String,
+    pub data: AgyInitData,
+}
+
 #[derive(Debug, Default)]
 struct InitSlot {
-    data: Mutex<Option<AgyInitData>>,
+    payload: Mutex<Option<AgyInitPayload>>,
     notify: Notify,
 }
 
 impl InitSlot {
-    async fn publish(&self, init: AgyInitData) {
-        let mut guard = self.data.lock().await;
+    async fn publish(&self, conversation_id: String, init: AgyInitData) {
+        let mut guard = self.payload.lock().await;
         if guard.is_none() {
-            *guard = Some(init);
+            *guard = Some(AgyInitPayload {
+                conversation_id,
+                data: init,
+            });
             self.notify.notify_waiters();
         }
     }
 
-    async fn get(&self) -> Option<AgyInitData> {
-        self.data.lock().await.clone()
+    async fn get(&self) -> Option<AgyInitPayload> {
+        self.payload.lock().await.clone()
     }
 
-    async fn wait(&self, duration: Duration) -> Result<AgyInitData, AgyProcessError> {
-        if let Some(data) = self.get().await {
-            return Ok(data);
+    async fn wait(&self, duration: Duration) -> Result<AgyInitPayload, AgyProcessError> {
+        if let Some(payload) = self.get().await {
+            return Ok(payload);
         }
         let notified = self.notify.notified();
         tokio::pin!(notified);
@@ -127,58 +137,64 @@ impl AgyProcessHandle {
             args.push(agent);
         }
 
-        if let Some(model) = resolved_model {
-            // Strip any hardcoded effort suffix if present to avoid
-            // CLI crash when --effort is also passed.
-            let (base_model, embedded_effort) = if let Some(base) = model.strip_suffix("-high") {
-                (base.to_string(), Some("high"))
-            } else if let Some(base) = model.strip_suffix("-medium") {
-                (base.to_string(), Some("medium"))
-            } else if let Some(base) = model.strip_suffix("-low") {
-                (base.to_string(), Some("low"))
-            } else {
-                (model.clone(), None)
-            };
-
-            args.push("--model".to_string());
-            args.push(base_model.clone());
-
-            // Only pass --effort if the model supports it.
-            // Models like Claude (e.g. claude-sonnet-4-6) crash if --effort is passed.
-            let model_supports_effort = !base_model.starts_with("claude");
-            if model_supports_effort {
-                let effort_to_pass = config
-                    .effort
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .or(embedded_effort);
-
-                let eff = match effort_to_pass {
-                    Some(e) => {
-                        if base_model.starts_with("gpt-oss") && e != "medium" {
-                            "medium"
-                        } else {
-                            e
-                        }
-                    }
-                    None => {
-                        if base_model.starts_with("gpt-oss") {
-                            "medium"
-                        } else {
-                            "high"
-                        }
-                    }
+        // When resuming, only pass --model and --effort if an explicit override is requested.
+        // Otherwise, agy maintains the existing conversation's model and effort settings.
+        let should_pass_model = !config.resume || config.model.is_some();
+        if should_pass_model {
+            if let Some(model) = resolved_model {
+                // Strip any hardcoded effort suffix if present to avoid
+                // CLI crash when --effort is also passed.
+                let (base_model, embedded_effort) = if let Some(base) = model.strip_suffix("-high") {
+                    (base.to_string(), Some("high"))
+                } else if let Some(base) = model.strip_suffix("-medium") {
+                    (base.to_string(), Some("medium"))
+                } else if let Some(base) = model.strip_suffix("-low") {
+                    (base.to_string(), Some("low"))
+                } else {
+                    (model.clone(), None)
                 };
 
-                args.push("--effort".to_string());
-                args.push(eff.to_lowercase());
+                args.push("--model".to_string());
+                args.push(base_model.clone());
+
+                // Only pass --effort if the model supports it.
+                // Models like Claude (e.g. claude-sonnet-4-6) crash if --effort is passed.
+                let model_supports_effort = !base_model.starts_with("claude");
+                if model_supports_effort {
+                    let effort_to_pass = config
+                        .effort
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .or(embedded_effort);
+
+                    let eff = match effort_to_pass {
+                        Some(e) => {
+                            if base_model.starts_with("gpt-oss") && e != "medium" {
+                                "medium"
+                            } else {
+                                e
+                            }
+                        }
+                        None => {
+                            if base_model.starts_with("gpt-oss") {
+                                "medium"
+                            } else {
+                                "high"
+                            }
+                        }
+                    };
+
+                    args.push("--effort".to_string());
+                    args.push(eff.to_lowercase());
+                }
             }
         }
 
         if config.resume {
             args.push("--conversation".to_string());
-            args.push(config.thread_id.clone());
+            let resume_id = config.agy_session_id.as_deref().unwrap_or(&config.thread_id);
+            args.push(resume_id.to_string());
         }
 
         args.push("--add-dir".to_string());
@@ -288,7 +304,7 @@ impl AgyProcessHandle {
         self.events_tx.subscribe()
     }
 
-    pub async fn wait_for_init(&self, duration: Duration) -> Result<AgyInitData, AgyProcessError> {
+    pub async fn wait_for_init(&self, duration: Duration) -> Result<AgyInitPayload, AgyProcessError> {
         self.init_slot.wait(duration).await
     }
 
@@ -384,8 +400,8 @@ async fn reader_task(
 
         match serde_json::from_str::<AgyOutbound>(trimmed) {
             Ok(event) => {
-                if let AgyOutbound::Init { ref init, .. } = event {
-                    init_slot.publish(init.clone()).await;
+                if let AgyOutbound::Init { ref conversation_id, ref init } = event {
+                    init_slot.publish(conversation_id.clone(), init.clone()).await;
                 }
                 let _ = events_tx.send(event);
             }

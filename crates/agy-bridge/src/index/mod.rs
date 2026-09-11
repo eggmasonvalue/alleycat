@@ -30,6 +30,10 @@ pub struct AgySessionRef {
     pub status: String,
     #[serde(default)]
     pub step_count: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
 }
 
 pub type IndexEntry = CoreIndexEntry<AgySessionRef>;
@@ -60,6 +64,8 @@ pub fn entry_from_agy(info: &AgySessionInfo) -> IndexEntry {
             nesting_depth: info.nesting_depth,
             status: info.status.clone(),
             step_count: info.step_count,
+            model: info.model.clone(),
+            effort: info.effort.clone(),
         },
     }
 }

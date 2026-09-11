@@ -55,7 +55,7 @@ pub async fn handle_thread_start(
 
     let (thread_id, _handle) = state
         .agy_pool()
-        .acquire_for_new_thread(&cwd, model.clone(), effort)
+        .acquire_for_new_thread(&cwd, model.clone(), effort.clone())
         .await
         .map_err(ThreadError::pool)?;
 
@@ -65,6 +65,11 @@ pub async fn handle_thread_start(
         .clone()
         .or_else(|| defaults.model_provider.clone())
         .unwrap_or_else(|| "google".to_string());
+
+    let response_model = model
+        .as_deref()
+        .map(normalize_agy_model_id)
+        .unwrap_or_else(|| DEFAULT_MODEL.to_string());
 
     let entry = IndexEntry {
         thread_id: thread_id.clone(),
@@ -83,6 +88,8 @@ pub async fn handle_thread_start(
             nesting_depth: 0,
             status: "ACTIVE".to_string(),
             step_count: 0,
+            model: Some(response_model.clone()),
+            effort: effort.clone(),
         },
     };
 
@@ -91,10 +98,6 @@ pub async fn handle_thread_start(
         .insert(entry.clone())
         .await
         .map_err(ThreadError::from)?;
-
-    let response_model = model
-        .map(|m| normalize_agy_model_id(&m))
-        .unwrap_or_else(|| DEFAULT_MODEL.to_string());
 
     let approval_policy = params
         .approval_policy
@@ -151,6 +154,8 @@ pub async fn handle_thread_resume(
                     nesting_depth: 0,
                     status: "ACTIVE".to_string(),
                     step_count: 0,
+                    model: None,
+                    effort: None,
                 },
             };
             let _ = state.thread_index().insert(entry.clone()).await;
@@ -160,12 +165,40 @@ pub async fn handle_thread_resume(
 
     let cwd = PathBuf::from(&entry.cwd);
     let defaults = state.defaults();
-    let model = normalize_agy_model(params.model.clone().or_else(|| defaults.model.clone()));
-    let effort = defaults.reasoning_effort.map(|e| format!("{e:?}").to_lowercase());
+    let is_explicit_override = params.model.is_some();
+    let model = normalize_agy_model(
+        params
+            .model
+            .clone()
+            .or_else(|| entry.metadata.model.clone())
+            .or_else(|| defaults.model.clone()),
+    );
+    let reasoning_effort = defaults.reasoning_effort.or_else(|| {
+        entry.metadata.effort.as_deref().and_then(|e| match e {
+            "minimal" => Some(p::ReasoningEffort::Minimal),
+            "low" => Some(p::ReasoningEffort::Low),
+            "medium" => Some(p::ReasoningEffort::Medium),
+            "high" => Some(p::ReasoningEffort::High),
+            _ => None,
+        })
+    });
+    let effort = reasoning_effort.map(|e| format!("{e:?}").to_lowercase());
 
+    // When resuming, only pass spawn_model if an explicit override was requested.
+    // Otherwise, pass None so agy preserves the conversation's existing model and effort.
+    let spawn_model = if is_explicit_override { model.clone() } else { None };
+    let spawn_effort = if is_explicit_override { effort.clone() } else { None };
+
+    let agy_session_id = entry.metadata.agy_session_id.clone();
     let _handle = state
         .agy_pool()
-        .acquire_for_resume(&params.thread_id, &cwd, model.clone(), effort)
+        .acquire_for_resume(
+            &params.thread_id,
+            Some(&agy_session_id),
+            &cwd,
+            spawn_model,
+            spawn_effort,
+        )
         .await
         .map_err(ThreadError::pool)?;
 
@@ -188,7 +221,8 @@ pub async fn handle_thread_resume(
     }
 
     let response_model = model
-        .map(|m| normalize_agy_model_id(&m))
+        .as_deref()
+        .map(normalize_agy_model_id)
         .unwrap_or_else(|| DEFAULT_MODEL.to_string());
 
     let model_provider = entry.model_provider.clone();
@@ -214,7 +248,7 @@ pub async fn handle_thread_resume(
         sandbox,
         permission_profile: params.permission_profile.or_else(|| Some(default_permission_profile())),
         active_permission_profile: None,
-        reasoning_effort: defaults.reasoning_effort.or(Some(p::ReasoningEffort::High)),
+        reasoning_effort: reasoning_effort.or(Some(p::ReasoningEffort::High)),
     })
 }
 
@@ -291,6 +325,8 @@ pub async fn handle_thread_read(
                     nesting_depth: 0,
                     status: "ACTIVE".to_string(),
                     step_count: 0,
+                    model: None,
+                    effort: None,
                 },
             }
         }

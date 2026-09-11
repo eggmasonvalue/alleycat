@@ -110,7 +110,7 @@ impl AgyPool {
         let thread_id = Uuid::now_v7().to_string();
         self.inner.ensure_capacity_for(&thread_id).await?;
         let handle = self
-            .spawn_handle(&thread_id, cwd, model, effort, false)
+            .spawn_handle(&thread_id, None, cwd, model, effort, false)
             .await
             .map_err(PoolError::Spawn)?;
         let arc = Arc::new(handle);
@@ -123,6 +123,7 @@ impl AgyPool {
     pub async fn acquire_for_resume(
         &self,
         thread_id: &str,
+        agy_session_id: Option<&str>,
         cwd: &Path,
         model: Option<String>,
         effort: Option<String>,
@@ -132,7 +133,7 @@ impl AgyPool {
         }
         self.inner.ensure_capacity_for(thread_id).await?;
         let handle = self
-            .spawn_handle(thread_id, cwd, model, effort, true)
+            .spawn_handle(thread_id, agy_session_id, cwd, model, effort, true)
             .await
             .map_err(PoolError::Spawn)?;
         let arc = Arc::new(handle);
@@ -165,6 +166,7 @@ impl AgyPool {
     async fn spawn_handle(
         &self,
         thread_id: &str,
+        agy_session_id: Option<&str>,
         cwd: &Path,
         model: Option<String>,
         effort: Option<String>,
@@ -172,6 +174,7 @@ impl AgyPool {
     ) -> anyhow::Result<AgyProcessHandle> {
         let config = AgySpawnConfig {
             thread_id: thread_id.to_string(),
+            agy_session_id: agy_session_id.map(str::to_string),
             cwd: cwd.to_path_buf(),
             agy_bin: self.agy_bin.clone(),
             model,

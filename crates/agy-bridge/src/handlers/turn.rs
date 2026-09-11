@@ -41,11 +41,33 @@ pub async fn handle_turn_start(
     state: &Arc<ConnectionState>,
     params: p::TurnStartParams,
 ) -> Result<p::TurnStartResponse, TurnError> {
-    let handle = state
-        .agy_pool()
-        .get(&params.thread_id)
-        .await
-        .ok_or_else(|| TurnError::ThreadNotLoaded(params.thread_id.clone()))?;
+    let handle = match state.agy_pool().get(&params.thread_id).await {
+        Some(h) => h,
+        None => {
+            if let Some(entry) = state.thread_index().lookup(&params.thread_id).await {
+                let cwd = std::path::PathBuf::from(&entry.cwd);
+                let defaults = state.defaults();
+                let effort = defaults
+                    .reasoning_effort
+                    .map(|e| format!("{e:?}").to_lowercase())
+                    .or_else(|| entry.metadata.effort.clone());
+                let agy_session_id = entry.metadata.agy_session_id.clone();
+                state
+                    .agy_pool()
+                    .acquire_for_resume(
+                        &params.thread_id,
+                        Some(&agy_session_id),
+                        &cwd,
+                        None,
+                        effort,
+                    )
+                    .await
+                    .map_err(|e| TurnError::AgyProcess(e.to_string()))?
+            } else {
+                return Err(TurnError::ThreadNotLoaded(params.thread_id.clone()));
+            }
+        }
+    };
 
     let prompt = translate_user_input(&params.input)
         .map_err(|e| TurnError::InputTranslation(e.to_string()))?;
@@ -60,7 +82,35 @@ pub async fn handle_turn_start(
         .send_prompt(&prompt)
         .map_err(|e| TurnError::AgyProcess(e.to_string()))?;
 
-    let _ = handle.wait_for_init(crate::pool::DEFAULT_INIT_TIMEOUT).await;
+    let init_res = handle.wait_for_init(crate::pool::DEFAULT_INIT_TIMEOUT).await;
+    if let Ok(ref init) = init_res {
+        let real_id = &init.conversation_id;
+        let real_model = &init.data.model;
+        if let Some(mut entry) = state.thread_index().lookup(&params.thread_id).await {
+            let mut changed = false;
+            if &entry.metadata.agy_session_id != real_id {
+                entry.metadata.agy_session_id = real_id.clone();
+                changed = true;
+            }
+            if let Some(m) = real_model {
+                let (base, eff) = crate::index::agy_session_scan::parse_model_and_effort(m);
+                let norm = base.unwrap_or_else(|| m.clone());
+                if entry.metadata.model.as_deref() != Some(&norm) {
+                    entry.metadata.model = Some(norm);
+                    changed = true;
+                }
+                if let Some(e) = eff {
+                    if entry.metadata.effort.as_deref() != Some(&e) {
+                        entry.metadata.effort = Some(e);
+                        changed = true;
+                    }
+                }
+            }
+            if changed {
+                let _ = state.thread_index().insert(entry).await;
+            }
+        }
+    }
 
     let turn = p::Turn {
         id: turn_id.clone(),
@@ -128,7 +178,6 @@ pub async fn handle_turn_interrupt(
     if let Some(handle) = state.agy_pool().get(&params.thread_id).await {
         handle.interrupt().await;
     }
-    state.agy_pool().release(&params.thread_id).await;
     Ok(p::TurnInterruptResponse::default())
 }
 
