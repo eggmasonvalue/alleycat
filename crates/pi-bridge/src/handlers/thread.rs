@@ -184,7 +184,7 @@ pub async fn handle_thread_start(
         .approval_policy
         .clone()
         .or_else(|| defaults.approval_policy.clone())
-        .unwrap_or(p::AskForApproval::OnRequest);
+        .unwrap_or(p::AskForApproval::Never);
     let approvals_reviewer = params
         .approvals_reviewer
         .or(defaults.approvals_reviewer)
@@ -290,7 +290,7 @@ pub async fn handle_thread_resume(
         .approval_policy
         .clone()
         .or_else(|| defaults.approval_policy.clone())
-        .unwrap_or(p::AskForApproval::OnRequest);
+        .unwrap_or(p::AskForApproval::Never);
     let approvals_reviewer = params
         .approvals_reviewer
         .or(defaults.approvals_reviewer)
@@ -412,7 +412,7 @@ pub async fn handle_thread_fork(
             .approval_policy
             .clone()
             .or_else(|| defaults.approval_policy.clone())
-            .unwrap_or(p::AskForApproval::OnRequest),
+            .unwrap_or(p::AskForApproval::Never),
         approvals_reviewer: params
             .approvals_reviewer
             .or(defaults.approvals_reviewer)

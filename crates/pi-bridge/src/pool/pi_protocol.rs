@@ -579,7 +579,8 @@ pub enum PiEvent {
         message: AgentMessage,
     },
     MessageUpdate {
-        message: AgentMessage,
+        #[serde(default)]
+        message: Option<AgentMessage>,
         #[serde(rename = "assistantMessageEvent")]
         assistant_message_event: Box<AssistantMessageEvent>,
     },
@@ -667,6 +668,9 @@ pub enum PiEvent {
         event: Value,
         error: Value,
     },
+    AgentSettled,
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -802,68 +806,93 @@ pub enum ExtensionUiResponse {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AssistantMessageEvent {
     Start {
-        partial: AssistantMessage,
+        #[serde(default)]
+        partial: Option<AssistantMessage>,
     },
     TextStart {
-        #[serde(rename = "contentIndex")]
+        #[serde(default, rename = "contentIndex")]
         content_index: u32,
-        partial: AssistantMessage,
+        #[serde(default)]
+        partial: Option<AssistantMessage>,
     },
     TextDelta {
-        #[serde(rename = "contentIndex")]
+        #[serde(default, rename = "contentIndex")]
         content_index: u32,
+        #[serde(default)]
         delta: String,
-        partial: AssistantMessage,
+        #[serde(default)]
+        partial: Option<AssistantMessage>,
     },
     TextEnd {
-        #[serde(rename = "contentIndex")]
+        #[serde(default, rename = "contentIndex")]
         content_index: u32,
+        #[serde(default)]
         content: String,
-        partial: AssistantMessage,
+        #[serde(default)]
+        partial: Option<AssistantMessage>,
     },
     ThinkingStart {
-        #[serde(rename = "contentIndex")]
+        #[serde(default, rename = "contentIndex")]
         content_index: u32,
-        partial: AssistantMessage,
+        #[serde(default)]
+        partial: Option<AssistantMessage>,
     },
     ThinkingDelta {
-        #[serde(rename = "contentIndex")]
+        #[serde(default, rename = "contentIndex")]
         content_index: u32,
+        #[serde(default)]
         delta: String,
-        partial: AssistantMessage,
+        #[serde(default)]
+        partial: Option<AssistantMessage>,
     },
     ThinkingEnd {
-        #[serde(rename = "contentIndex")]
+        #[serde(default, rename = "contentIndex")]
         content_index: u32,
+        #[serde(default)]
         content: String,
-        partial: AssistantMessage,
+        #[serde(default)]
+        partial: Option<AssistantMessage>,
     },
     ToolcallStart {
-        #[serde(rename = "contentIndex")]
+        #[serde(default, rename = "contentIndex")]
         content_index: u32,
-        partial: AssistantMessage,
+        #[serde(default)]
+        id: Option<String>,
+        #[serde(default, rename = "toolName")]
+        tool_name: Option<String>,
+        #[serde(default)]
+        partial: Option<AssistantMessage>,
     },
     ToolcallDelta {
-        #[serde(rename = "contentIndex")]
+        #[serde(default, rename = "contentIndex")]
         content_index: u32,
+        #[serde(default)]
         delta: String,
-        partial: AssistantMessage,
+        #[serde(default)]
+        partial: Option<AssistantMessage>,
     },
     ToolcallEnd {
-        #[serde(rename = "contentIndex")]
+        #[serde(default, rename = "contentIndex")]
         content_index: u32,
-        #[serde(rename = "toolCall")]
-        tool_call: ToolCall,
-        partial: AssistantMessage,
+        #[serde(default, rename = "toolCall")]
+        tool_call: Option<ToolCall>,
+        #[serde(default)]
+        partial: Option<AssistantMessage>,
     },
     Done {
-        reason: StopReason,
-        message: AssistantMessage,
+        #[serde(default)]
+        reason: Option<StopReason>,
+        #[serde(default)]
+        message: Option<AssistantMessage>,
     },
     Error {
-        reason: StopReason,
-        error: AssistantMessage,
+        #[serde(default)]
+        reason: Option<StopReason>,
+        #[serde(default)]
+        error: Option<AssistantMessage>,
     },
+    #[serde(other)]
+    Unknown,
 }
 
 // ============================================================================
