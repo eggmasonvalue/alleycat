@@ -129,7 +129,7 @@ pub async fn handle_thread_resume(
     state: &Arc<ConnectionState>,
     params: p::ThreadResumeParams,
 ) -> Result<p::ThreadResumeResponse, ThreadError> {
-    let entry = match state.thread_index().lookup(&params.thread_id).await {
+    let mut entry = match state.thread_index().lookup(&params.thread_id).await {
         Some(e) => e,
         None => {
             let cwd_str = resolve_cwd(params.cwd.as_deref())
@@ -165,29 +165,58 @@ pub async fn handle_thread_resume(
 
     let cwd = PathBuf::from(&entry.cwd);
     let defaults = state.defaults();
-    let is_explicit_override = params.model.is_some();
+
+    let (disk_model, disk_effort) = if entry.metadata.model.is_none() {
+        if let Some(db_path) = crate::index::agy_session_scan::default_agy_summaries_db() {
+            let base = db_path.parent();
+            let raw = crate::index::agy_session_scan::read_conversation_model_from_disk(
+                base,
+                &entry.metadata.agy_session_id,
+            );
+            raw.as_deref()
+                .map(crate::index::agy_session_scan::parse_model_and_effort)
+                .unwrap_or((None, None))
+        } else {
+            (None, None)
+        }
+    } else {
+        (None, None)
+    };
+
     let model = normalize_agy_model(
         params
             .model
             .clone()
             .or_else(|| entry.metadata.model.clone())
+            .or(disk_model)
             .or_else(|| defaults.model.clone()),
     );
-    let reasoning_effort = defaults.reasoning_effort.or_else(|| {
-        entry.metadata.effort.as_deref().and_then(|e| match e {
-            "minimal" => Some(p::ReasoningEffort::Minimal),
-            "low" => Some(p::ReasoningEffort::Low),
-            "medium" => Some(p::ReasoningEffort::Medium),
-            "high" => Some(p::ReasoningEffort::High),
-            _ => None,
-        })
-    });
-    let effort = reasoning_effort.map(|e| format!("{e:?}").to_lowercase());
+    let reasoning_effort = defaults
+        .reasoning_effort
+        .or_else(|| {
+            entry
+                .metadata
+                .effort
+                .as_deref()
+                .or(disk_effort.as_deref())
+                .and_then(|e| match e {
+                    "minimal" => Some(p::ReasoningEffort::Minimal),
+                    "low" => Some(p::ReasoningEffort::Low),
+                    "medium" => Some(p::ReasoningEffort::Medium),
+                    "high" => Some(p::ReasoningEffort::High),
+                    _ => None,
+                })
+        });
+    let effort = reasoning_effort.map(|e| format!("{e:?}").to_lowercase()).or(disk_effort);
 
-    // When resuming, only pass spawn_model if an explicit override was requested.
-    // Otherwise, pass None so agy preserves the conversation's existing model and effort.
-    let spawn_model = if is_explicit_override { model.clone() } else { None };
-    let spawn_effort = if is_explicit_override { effort.clone() } else { None };
+    if entry.metadata.model.is_none() && model.is_some() {
+        entry.metadata.model = model.clone();
+        entry.metadata.effort = effort.clone();
+        let _ = state.thread_index().insert(entry.clone()).await;
+    }
+
+    let spawn_model = model.clone();
+    let spawn_effort = effort.clone();
 
     let agy_session_id = entry.metadata.agy_session_id.clone();
     let _handle = state

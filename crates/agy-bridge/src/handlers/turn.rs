@@ -48,12 +48,17 @@ pub async fn handle_turn_start(
             if let Some(entry) = state.thread_index().lookup(&params.thread_id).await {
                 let cwd = std::path::PathBuf::from(&entry.cwd);
                 let defaults = state.defaults();
+                let spawn_model = params
+                    .model
+                    .as_deref()
+                    .map(normalize_agy_model_id)
+                    .or_else(|| entry.metadata.model.clone())
+                    .or_else(|| defaults.model.clone());
                 let effort = params
                     .effort
                     .map(|e| format!("{e:?}").to_lowercase())
-                    .or_else(|| defaults.reasoning_effort.map(|e| format!("{e:?}").to_lowercase()))
-                    .or_else(|| entry.metadata.effort.clone());
-                let spawn_model = params.model.as_deref().map(normalize_agy_model_id);
+                    .or_else(|| entry.metadata.effort.clone())
+                    .or_else(|| defaults.reasoning_effort.map(|e| format!("{e:?}").to_lowercase()));
                 let agy_session_id = entry.metadata.agy_session_id.clone();
                 state
                     .agy_pool()
@@ -265,7 +270,7 @@ async fn run_event_pump(
     thread_id: String,
     turn_id: String,
     cwd: String,
-    _handle: Arc<AgyProcessHandle>,
+    handle: Arc<AgyProcessHandle>,
     mut events_rx: broadcast::Receiver<AgyOutbound>,
     started_at: i64,
     user_input: Vec<p::UserInput>,
@@ -280,6 +285,10 @@ async fn run_event_pump(
     let mut final_error = None;
 
     loop {
+        if handle.is_interrupted() {
+            break;
+        }
+
         let event = match events_rx.recv().await {
             Ok(ev) => ev,
             Err(broadcast::error::RecvError::Lagged(n)) => {
@@ -323,9 +332,14 @@ async fn run_event_pump(
             }
         }
 
-        if terminal_seen {
+        if terminal_seen || handle.is_interrupted() {
             break;
         }
+    }
+
+    if handle.is_interrupted() {
+        tracing::debug!(thread_id = %thread_id, turn_id = %turn_id, "run_event_pump: handle was interrupted; exiting without duplicate completion");
+        return;
     }
 
     let completed_at = now_unix_millis();

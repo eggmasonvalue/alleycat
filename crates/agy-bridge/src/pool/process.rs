@@ -3,6 +3,7 @@
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -95,6 +96,7 @@ pub struct AgyProcessHandle {
     events_tx: broadcast::Sender<AgyOutbound>,
     init_slot: Arc<InitSlot>,
     tasks: Arc<TaskSet>,
+    is_interrupted: Arc<AtomicBool>,
 }
 
 struct TaskSet {
@@ -137,57 +139,56 @@ impl AgyProcessHandle {
             args.push(agent);
         }
 
-        // When resuming, only pass --model and --effort if an explicit override is requested.
-        // Otherwise, agy maintains the existing conversation's model and effort settings.
-        let should_pass_model = !config.resume || config.model.is_some();
-        if should_pass_model {
-            if let Some(model) = resolved_model {
-                // Strip any hardcoded effort suffix if present to avoid
-                // CLI crash when --effort is also passed.
-                let (base_model, embedded_effort) = if let Some(base) = model.strip_suffix("-high") {
-                    (base.to_string(), Some("high"))
-                } else if let Some(base) = model.strip_suffix("-medium") {
-                    (base.to_string(), Some("medium"))
-                } else if let Some(base) = model.strip_suffix("-low") {
-                    (base.to_string(), Some("low"))
-                } else {
-                    (model.clone(), None)
+        // Always pass --model and --effort when a model is resolved,
+        // even on resume. If omitted on resume, agy CLI defaults to
+        // gemini-3.7-flash-high, which triggers an internal server restart
+        // and switches the model.
+        if let Some(model) = resolved_model {
+            // Strip any hardcoded effort suffix if present to avoid
+            // CLI crash when --effort is also passed.
+            let (base_model, embedded_effort) = if let Some(base) = model.strip_suffix("-high") {
+                (base.to_string(), Some("high"))
+            } else if let Some(base) = model.strip_suffix("-medium") {
+                (base.to_string(), Some("medium"))
+            } else if let Some(base) = model.strip_suffix("-low") {
+                (base.to_string(), Some("low"))
+            } else {
+                (model.clone(), None)
+            };
+
+            args.push("--model".to_string());
+            args.push(base_model.clone());
+
+            // Only pass --effort if the model supports it.
+            // Models like Claude (e.g. claude-sonnet-4-6) crash if --effort is passed.
+            let model_supports_effort = !base_model.starts_with("claude");
+            if model_supports_effort {
+                let effort_to_pass = config
+                    .effort
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .or(embedded_effort);
+
+                let eff = match effort_to_pass {
+                    Some(e) => {
+                        if base_model.starts_with("gpt-oss") && e != "medium" {
+                            "medium"
+                        } else {
+                            e
+                        }
+                    }
+                    None => {
+                        if base_model.starts_with("gpt-oss") {
+                            "medium"
+                        } else {
+                            "high"
+                        }
+                    }
                 };
 
-                args.push("--model".to_string());
-                args.push(base_model.clone());
-
-                // Only pass --effort if the model supports it.
-                // Models like Claude (e.g. claude-sonnet-4-6) crash if --effort is passed.
-                let model_supports_effort = !base_model.starts_with("claude");
-                if model_supports_effort {
-                    let effort_to_pass = config
-                        .effort
-                        .as_deref()
-                        .map(str::trim)
-                        .filter(|s| !s.is_empty())
-                        .or(embedded_effort);
-
-                    let eff = match effort_to_pass {
-                        Some(e) => {
-                            if base_model.starts_with("gpt-oss") && e != "medium" {
-                                "medium"
-                            } else {
-                                e
-                            }
-                        }
-                        None => {
-                            if base_model.starts_with("gpt-oss") {
-                                "medium"
-                            } else {
-                                "high"
-                            }
-                        }
-                    };
-
-                    args.push("--effort".to_string());
-                    args.push(eff.to_lowercase());
-                }
+                args.push("--effort".to_string());
+                args.push(eff.to_lowercase());
             }
         }
 
@@ -260,6 +261,7 @@ impl AgyProcessHandle {
         let (writer_tx, writer_rx) = mpsc::unbounded_channel::<String>();
         let (events_tx, _events_rx) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
         let init_slot = Arc::new(InitSlot::default());
+        let is_interrupted = Arc::new(AtomicBool::new(false));
 
         let writer = tokio::spawn(writer_task(stdin, writer_rx));
         let reader = tokio::spawn(reader_task(stdout, Arc::clone(&init_slot), events_tx.clone()));
@@ -281,6 +283,7 @@ impl AgyProcessHandle {
             events_tx,
             init_slot,
             tasks,
+            is_interrupted,
         })
     }
 
@@ -317,7 +320,12 @@ impl AgyProcessHandle {
             .map_err(|e| AgyProcessError::WriterFailed(e.to_string()))
     }
 
+    pub fn is_interrupted(&self) -> bool {
+        self.is_interrupted.load(Ordering::SeqCst)
+    }
+
     pub async fn interrupt(&self) {
+        self.is_interrupted.store(true, Ordering::SeqCst);
         if let Some(pid) = self.pid {
             #[cfg(unix)]
             unsafe {
@@ -334,6 +342,7 @@ impl AgyProcessHandle {
                 let _ = child.kill().await;
             }
         }
+        self.shutdown().await;
     }
 
     pub async fn shutdown(&self) {
@@ -343,12 +352,14 @@ impl AgyProcessHandle {
         if let Some(handle) = self.tasks.stderr.lock().await.take() {
             handle.abort();
         }
-        if let Some(mut child) = self.tasks.child.lock().await.take() {
-            let _ = child.kill().await;
-            let _ = child.wait().await;
-        }
         if let Some(handle) = self.tasks.reader.lock().await.take() {
             handle.abort();
+        }
+        if let Some(mut child) = self.tasks.child.lock().await.take() {
+            let _ = child.kill().await;
+            tokio::spawn(async move {
+                let _ = child.wait().await;
+            });
         }
     }
 }
