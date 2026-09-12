@@ -233,6 +233,14 @@ pub async fn handle_thread_resume(
 
     let mut thread = entry_to_thread(&entry);
     let mut recorded = state.recorded_turns(&params.thread_id);
+    if recorded.is_empty() && !agy_session_id.is_empty() {
+        recorded = state.recorded_turns(&agy_session_id);
+        if !recorded.is_empty() {
+            for r in &recorded {
+                state.record_or_update_turn(&params.thread_id, r.clone());
+            }
+        }
+    }
     let mut updated_any = false;
     for r in &mut recorded {
         if r.status == p::TurnStatus::InProgress && r.completed_at.is_none() {
@@ -376,7 +384,15 @@ pub async fn handle_thread_read(
 
     let mut thread = entry_to_thread(&entry);
     if params.include_turns {
-        let recorded = state.recorded_turns(&params.thread_id);
+        let mut recorded = state.recorded_turns(&params.thread_id);
+        if recorded.is_empty() && !entry.metadata.agy_session_id.is_empty() {
+            recorded = state.recorded_turns(&entry.metadata.agy_session_id);
+            if !recorded.is_empty() {
+                for r in &recorded {
+                    state.record_or_update_turn(&params.thread_id, r.clone());
+                }
+            }
+        }
         if !recorded.is_empty() {
             thread.turns = recorded
                 .into_iter()
@@ -400,7 +416,19 @@ pub async fn handle_thread_turns_list(
     state: &Arc<ConnectionState>,
     params: p::ThreadTurnsListParams,
 ) -> Result<p::ThreadTurnsListResponse, ThreadError> {
-    let recorded = state.recorded_turns(&params.thread_id);
+    let mut recorded = state.recorded_turns(&params.thread_id);
+    if recorded.is_empty() {
+        if let Some(entry) = state.thread_index().lookup(&params.thread_id).await {
+            if !entry.metadata.agy_session_id.is_empty() {
+                recorded = state.recorded_turns(&entry.metadata.agy_session_id);
+                if !recorded.is_empty() {
+                    for r in &recorded {
+                        state.record_or_update_turn(&params.thread_id, r.clone());
+                    }
+                }
+            }
+        }
+    }
     let data = recorded
         .into_iter()
         .map(|r| p::Turn {
