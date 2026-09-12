@@ -10,7 +10,7 @@ use thiserror::Error;
 use crate::handlers::model::{DEFAULT_MODEL, normalize_agy_model, normalize_agy_model_id};
 use crate::index::{AgySessionRef, IndexEntry, entry_to_thread};
 use crate::pool::PoolError;
-use crate::state::ConnectionState;
+use crate::state::{ConnectionState, RecordedTurn};
 
 #[derive(Debug, Error)]
 pub enum ThreadError {
@@ -125,6 +125,33 @@ pub async fn handle_thread_start(
     })
 }
 
+fn load_best_turns(
+    state: &Arc<ConnectionState>,
+    thread_id: &str,
+    agy_session_id: &str,
+) -> Vec<RecordedTurn> {
+    let local = state.recorded_turns(thread_id);
+    if agy_session_id.is_empty() {
+        return local;
+    }
+    let canonical = state.recorded_turns(agy_session_id);
+    if canonical.is_empty() {
+        return local;
+    }
+    if local.is_empty() {
+        return canonical;
+    }
+
+    let count_items = |turns: &[RecordedTurn]| -> usize {
+        turns.iter().map(|t| t.items.len()).sum()
+    };
+    if count_items(&canonical) >= count_items(&local) {
+        canonical
+    } else {
+        local
+    }
+}
+
 pub async fn handle_thread_resume(
     state: &Arc<ConnectionState>,
     params: p::ThreadResumeParams,
@@ -232,14 +259,9 @@ pub async fn handle_thread_resume(
         .map_err(ThreadError::pool)?;
 
     let mut thread = entry_to_thread(&entry);
-    let mut recorded = state.recorded_turns(&params.thread_id);
-    if recorded.is_empty() && !agy_session_id.is_empty() {
-        recorded = state.recorded_turns(&agy_session_id);
-        if !recorded.is_empty() {
-            for r in &recorded {
-                state.record_or_update_turn(&params.thread_id, r.clone());
-            }
-        }
+    let mut recorded = load_best_turns(state, &params.thread_id, &agy_session_id);
+    for r in &recorded {
+        state.record_or_update_turn(&params.thread_id, r.clone());
     }
     let mut updated_any = false;
     for r in &mut recorded {
@@ -384,16 +406,11 @@ pub async fn handle_thread_read(
 
     let mut thread = entry_to_thread(&entry);
     if params.include_turns {
-        let mut recorded = state.recorded_turns(&params.thread_id);
-        if recorded.is_empty() && !entry.metadata.agy_session_id.is_empty() {
-            recorded = state.recorded_turns(&entry.metadata.agy_session_id);
-            if !recorded.is_empty() {
-                for r in &recorded {
-                    state.record_or_update_turn(&params.thread_id, r.clone());
-                }
-            }
-        }
+        let mut recorded = load_best_turns(state, &params.thread_id, &entry.metadata.agy_session_id);
         if !recorded.is_empty() {
+            for r in &recorded {
+                state.record_or_update_turn(&params.thread_id, r.clone());
+            }
             thread.turns = recorded
                 .into_iter()
                 .map(|r| p::Turn {
@@ -416,19 +433,12 @@ pub async fn handle_thread_turns_list(
     state: &Arc<ConnectionState>,
     params: p::ThreadTurnsListParams,
 ) -> Result<p::ThreadTurnsListResponse, ThreadError> {
-    let mut recorded = state.recorded_turns(&params.thread_id);
-    if recorded.is_empty() {
-        if let Some(entry) = state.thread_index().lookup(&params.thread_id).await {
-            if !entry.metadata.agy_session_id.is_empty() {
-                recorded = state.recorded_turns(&entry.metadata.agy_session_id);
-                if !recorded.is_empty() {
-                    for r in &recorded {
-                        state.record_or_update_turn(&params.thread_id, r.clone());
-                    }
-                }
-            }
-        }
-    }
+    let agy_session_id = if let Some(entry) = state.thread_index().lookup(&params.thread_id).await {
+        entry.metadata.agy_session_id.clone()
+    } else {
+        String::new()
+    };
+    let recorded = load_best_turns(state, &params.thread_id, &agy_session_id);
     let data = recorded
         .into_iter()
         .map(|r| p::Turn {
