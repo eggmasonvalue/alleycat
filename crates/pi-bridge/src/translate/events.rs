@@ -193,6 +193,8 @@ impl EventTranslatorState {
                 format!("extension {extension_path} raised an error handling {event}: {error}"),
                 false,
             )],
+            PiEvent::AgentSettled => Vec::new(),
+            PiEvent::Unknown => Vec::new(),
         }
     }
 
@@ -227,7 +229,8 @@ impl EventTranslatorState {
             AssistantMessageEvent::TextStart { .. } => Vec::new(),
             AssistantMessageEvent::TextDelta { delta, partial, .. } => {
                 if self.open_message_item.is_none() {
-                    let item_id = assistant_item_id(self.turn_index, partial.timestamp);
+                    let ts = partial.as_ref().map(|p| p.timestamp).unwrap_or(0);
+                    let item_id = assistant_item_id(self.turn_index, ts);
                     self.open_message_item = Some(OpenItem {
                         item_id,
                         started: false,
@@ -273,7 +276,8 @@ impl EventTranslatorState {
                 content, partial, ..
             } => {
                 if self.open_message_item.is_none() && !content.is_empty() {
-                    let item_id = assistant_item_id(self.turn_index, partial.timestamp);
+                    let ts = partial.as_ref().map(|p| p.timestamp).unwrap_or(0);
+                    let item_id = assistant_item_id(self.turn_index, ts);
                     self.open_message_item = Some(OpenItem {
                         item_id,
                         started: false,
@@ -284,7 +288,8 @@ impl EventTranslatorState {
             }
 
             AssistantMessageEvent::ThinkingStart { partial, .. } => {
-                let item_id = reasoning_item_id(self.turn_index, partial.timestamp);
+                let ts = partial.as_ref().map(|p| p.timestamp).unwrap_or(0);
+                let item_id = reasoning_item_id(self.turn_index, ts);
                 self.open_reasoning_item = Some(OpenItem {
                     item_id: item_id.clone(),
                     started: true,
@@ -331,13 +336,17 @@ impl EventTranslatorState {
             AssistantMessageEvent::Start { .. } => Vec::new(),
             AssistantMessageEvent::Done { .. } => Vec::new(),
             AssistantMessageEvent::Error { reason, error } => {
-                let message = error.error_message.clone().unwrap_or_else(|| match reason {
-                    PiStopReason::Aborted => "aborted".to_string(),
-                    PiStopReason::Error => "error".to_string(),
-                    _ => "stream error".to_string(),
-                });
+                let message = error
+                    .as_ref()
+                    .and_then(|e| e.error_message.clone())
+                    .unwrap_or_else(|| match reason {
+                        Some(PiStopReason::Aborted) => "aborted".to_string(),
+                        Some(PiStopReason::Error) => "error".to_string(),
+                        _ => "stream error".to_string(),
+                    });
                 vec![self.error_notification(message, false)]
             }
+            AssistantMessageEvent::Unknown => Vec::new(),
         }
     }
 
@@ -1296,11 +1305,11 @@ mod tests {
         let item_id = s.open_message_item.as_ref().unwrap().item_id.clone();
 
         let out = s.translate(PiEvent::MessageUpdate {
-            message: agent_msg(""),
+            message: Some(agent_msg("")),
             assistant_message_event: Box::new(AssistantMessageEvent::TextDelta {
                 content_index: 0,
                 delta: "hi".into(),
-                partial: assistant_message(""),
+                partial: Some(assistant_message("")),
             }),
         });
         assert_eq!(out.len(), 2);
@@ -1334,10 +1343,10 @@ mod tests {
             message: AgentMessage::Assistant(message.clone()),
         });
         let thinking = live.translate(PiEvent::MessageUpdate {
-            message: AgentMessage::Assistant(message.clone()),
+            message: Some(AgentMessage::Assistant(message.clone())),
             assistant_message_event: Box::new(AssistantMessageEvent::ThinkingStart {
                 content_index: 0,
-                partial: message.clone(),
+                partial: Some(message.clone()),
             }),
         });
 
@@ -1372,10 +1381,10 @@ mod tests {
     fn thinking_lifecycle_emits_reasoning_item() {
         let mut s = state();
         let started = s.translate(PiEvent::MessageUpdate {
-            message: agent_msg(""),
+            message: Some(agent_msg("")),
             assistant_message_event: Box::new(AssistantMessageEvent::ThinkingStart {
                 content_index: 0,
-                partial: assistant_message(""),
+                partial: Some(assistant_message("")),
             }),
         });
         assert_eq!(started.len(), 1);
@@ -1388,11 +1397,11 @@ mod tests {
         }
 
         let delta = s.translate(PiEvent::MessageUpdate {
-            message: agent_msg(""),
+            message: Some(agent_msg("")),
             assistant_message_event: Box::new(AssistantMessageEvent::ThinkingDelta {
                 content_index: 0,
                 delta: "thinking…".into(),
-                partial: assistant_message(""),
+                partial: Some(assistant_message("")),
             }),
         });
         match &delta[0] {
@@ -1401,11 +1410,11 @@ mod tests {
         }
 
         let ended = s.translate(PiEvent::MessageUpdate {
-            message: agent_msg(""),
+            message: Some(agent_msg("")),
             assistant_message_event: Box::new(AssistantMessageEvent::ThinkingEnd {
                 content_index: 0,
                 content: "thinking done".into(),
-                partial: assistant_message(""),
+                partial: Some(assistant_message("")),
             }),
         });
         match &ended[0] {

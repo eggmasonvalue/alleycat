@@ -53,7 +53,7 @@ async fn fetch_models_via_pool(state: &Arc<ConnectionState>) -> Vec<PiAvailableM
     let handle = match state.pi_pool().acquire_utility(None).await {
         Ok(h) => h,
         Err(err) => {
-            tracing::warn!(%err, "model/list: failed to acquire utility pi handle");
+            tracing::warn!(err = ?err, "model/list: failed to acquire utility pi handle");
             return Vec::new();
         }
     };
@@ -135,6 +135,9 @@ fn filter_models_by_enabled_models(models: Vec<PiAvailableModel>) -> Vec<PiAvail
     let Some(patterns) = enabled_model_patterns_from_settings() else {
         return models;
     };
+    if patterns.is_empty() {
+        return models;
+    }
     let filtered: Vec<PiAvailableModel> = models
         .iter()
         .filter(|model| model_matches_enabled_patterns(model, &patterns))

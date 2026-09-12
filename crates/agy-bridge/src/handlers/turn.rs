@@ -1,0 +1,415 @@
+//! `turn/*` request handlers and background event pump for Google Antigravity CLI (`agy`).
+
+use std::sync::Arc;
+use std::time::SystemTime;
+
+use alleycat_codex_proto as p;
+use thiserror::Error;
+use tokio::sync::broadcast;
+use uuid::Uuid;
+
+use crate::handlers::model::normalize_agy_model_id;
+use crate::pool::AgyProcessHandle;
+use crate::pool::agy_protocol::AgyOutbound;
+use crate::state::{ConnectionState, RecordedTurn};
+use crate::translate::events::EventTranslatorState;
+use crate::translate::input::translate_user_input;
+
+#[derive(Debug, Error)]
+pub enum TurnError {
+    #[error("invalid params: {0}")]
+    InvalidParams(String),
+    #[error("thread `{0}` is not loaded; call thread/start or thread/resume first")]
+    ThreadNotLoaded(String),
+    #[error("input translation failed: {0}")]
+    InputTranslation(String),
+    #[error("agy process error: {0}")]
+    AgyProcess(String),
+}
+
+impl TurnError {
+    pub fn rpc_code(&self) -> i64 {
+        match self {
+            TurnError::InvalidParams(_) | TurnError::ThreadNotLoaded(_) | TurnError::InputTranslation(_) => {
+                p::error_codes::INVALID_PARAMS
+            }
+            TurnError::AgyProcess(_) => p::error_codes::INTERNAL_ERROR,
+        }
+    }
+}
+
+pub async fn handle_turn_start(
+    state: &Arc<ConnectionState>,
+    params: p::TurnStartParams,
+) -> Result<p::TurnStartResponse, TurnError> {
+    let handle = match state.agy_pool().get(&params.thread_id).await {
+        Some(h) => h,
+        None => {
+            if let Some(entry) = state.thread_index().lookup(&params.thread_id).await {
+                let cwd = std::path::PathBuf::from(&entry.cwd);
+                let defaults = state.defaults();
+                let spawn_model = params
+                    .model
+                    .as_deref()
+                    .map(normalize_agy_model_id)
+                    .or_else(|| entry.metadata.model.clone())
+                    .or_else(|| defaults.model.clone());
+                let effort = params
+                    .effort
+                    .map(|e| format!("{e:?}").to_lowercase())
+                    .or_else(|| entry.metadata.effort.clone())
+                    .or_else(|| defaults.reasoning_effort.map(|e| format!("{e:?}").to_lowercase()));
+                let agy_session_id = entry.metadata.agy_session_id.clone();
+                state
+                    .agy_pool()
+                    .acquire_for_resume(
+                        &params.thread_id,
+                        Some(&agy_session_id),
+                        &cwd,
+                        spawn_model,
+                        effort,
+                    )
+                    .await
+                    .map_err(|e| TurnError::AgyProcess(e.to_string()))?
+            } else {
+                return Err(TurnError::ThreadNotLoaded(params.thread_id.clone()));
+            }
+        }
+    };
+
+    let prompt = translate_user_input(&params.input)
+        .map_err(|e| TurnError::InputTranslation(e.to_string()))?;
+
+    let turn_id = Uuid::now_v7().to_string();
+    let started_at = now_unix_millis();
+
+    if let Some(mut entry) = state.thread_index().lookup(&params.thread_id).await {
+        let mut changed = false;
+        if let Some(eff) = params.effort {
+            let eff_str = format!("{eff:?}").to_lowercase();
+            if entry.metadata.effort.as_deref() != Some(&eff_str) {
+                entry.metadata.effort = Some(eff_str);
+                changed = true;
+            }
+        }
+        if let Some(ref m) = params.model {
+            let norm = normalize_agy_model_id(m);
+            if entry.metadata.model.as_deref() != Some(&norm) {
+                entry.metadata.model = Some(norm);
+                changed = true;
+            }
+        }
+        if changed {
+            let _ = state.thread_index().insert(entry).await;
+        }
+    }
+
+    let initial_user_item = p::ThreadItem::UserMessage {
+        id: Uuid::now_v7().to_string(),
+        content: params.input.clone(),
+    };
+    state.record_or_update_turn(
+        &params.thread_id,
+        RecordedTurn {
+            turn_id: turn_id.clone(),
+            started_at,
+            completed_at: None,
+            status: p::TurnStatus::InProgress,
+            error: None,
+            items: vec![initial_user_item],
+        },
+    );
+
+    let _ = state.agy_pool().mark_active(&params.thread_id).await;
+    let events_rx = handle.subscribe();
+
+    handle
+        .send_prompt(&prompt)
+        .map_err(|e| TurnError::AgyProcess(e.to_string()))?;
+
+    let init_res = handle.wait_for_init(crate::pool::DEFAULT_INIT_TIMEOUT).await;
+    if let Ok(ref init) = init_res {
+        let real_id = &init.conversation_id;
+        let real_model = &init.data.model;
+        if let Some(mut entry) = state.thread_index().lookup(&params.thread_id).await {
+            let mut changed = false;
+            if &entry.metadata.agy_session_id != real_id {
+                entry.metadata.agy_session_id = real_id.clone();
+                changed = true;
+            }
+            if let Some(m) = real_model {
+                let (base, eff) = crate::index::agy_session_scan::parse_model_and_effort(m);
+                let norm = base.unwrap_or_else(|| m.clone());
+                if entry.metadata.model.as_deref() != Some(&norm) {
+                    entry.metadata.model = Some(norm);
+                    changed = true;
+                }
+                if let Some(e) = eff {
+                    if entry.metadata.effort.as_deref() != Some(&e) {
+                        entry.metadata.effort = Some(e);
+                        changed = true;
+                    }
+                }
+            }
+            if changed {
+                let _ = state.thread_index().insert(entry).await;
+            }
+        }
+    }
+
+    let turn = p::Turn {
+        id: turn_id.clone(),
+        items: Vec::new(),
+        items_view: p::default_items_view(),
+        status: p::TurnStatus::InProgress,
+        error: None,
+        started_at: Some(started_at),
+        completed_at: None,
+        duration_ms: None,
+    };
+
+    if state.should_emit("turn/started") {
+        let frame = notification_frame(p::ServerNotification::TurnStarted(
+            p::TurnStartedNotification {
+                thread_id: params.thread_id.clone(),
+                turn: turn.clone(),
+            },
+        ));
+        state.send(frame);
+    }
+
+    let cwd = handle.cwd().to_string_lossy().to_string();
+
+    tokio::spawn(run_event_pump(
+        Arc::clone(state),
+        params.thread_id,
+        turn_id,
+        cwd,
+        handle,
+        events_rx,
+        started_at,
+        params.input,
+    ));
+
+    Ok(p::TurnStartResponse { turn })
+}
+
+pub async fn handle_turn_steer(
+    state: &Arc<ConnectionState>,
+    params: p::TurnSteerParams,
+) -> Result<p::TurnSteerResponse, TurnError> {
+    let handle = state
+        .agy_pool()
+        .get(&params.thread_id)
+        .await
+        .ok_or_else(|| TurnError::ThreadNotLoaded(params.thread_id.clone()))?;
+
+    let prompt = translate_user_input(&params.input)
+        .map_err(|e| TurnError::InputTranslation(e.to_string()))?;
+
+    handle
+        .send_prompt(&prompt)
+        .map_err(|e| TurnError::AgyProcess(e.to_string()))?;
+
+    Ok(p::TurnSteerResponse {
+        turn_id: params.expected_turn_id,
+    })
+}
+
+pub async fn handle_turn_interrupt(
+    state: &Arc<ConnectionState>,
+    params: p::TurnInterruptParams,
+) -> Result<p::TurnInterruptResponse, TurnError> {
+    if let Some(handle) = state.agy_pool().get(&params.thread_id).await {
+        handle.interrupt().await;
+    }
+    let mut recorded = state.recorded_turns(&params.thread_id);
+    let mut last_turn_id = None;
+    if let Some(last) = recorded.last_mut() {
+        if last.status == p::TurnStatus::InProgress {
+            last.status = p::TurnStatus::Interrupted;
+            last.completed_at = Some(now_unix_millis());
+            last_turn_id = Some(last.turn_id.clone());
+            state.record_or_update_turn(&params.thread_id, last.clone());
+        }
+    }
+    state.agy_pool().release(&params.thread_id).await;
+
+    if state.should_emit("turn/completed") {
+        let turn_id = if !params.turn_id.trim().is_empty() {
+            params.turn_id.clone()
+        } else {
+            last_turn_id.unwrap_or_default()
+        };
+        let turn = p::Turn {
+            id: turn_id,
+            items: Vec::new(),
+            items_view: p::default_items_view(),
+            status: p::TurnStatus::Interrupted,
+            error: Some(p::TurnError {
+                message: "turn interrupted by user".to_string(),
+                codex_error_info: None,
+                additional_details: None,
+            }),
+            started_at: None,
+            completed_at: Some(now_unix_millis()),
+            duration_ms: None,
+        };
+        state.send(notification_frame(p::ServerNotification::TurnCompleted(
+            p::TurnCompletedNotification {
+                thread_id: params.thread_id.clone(),
+                turn,
+            },
+        )));
+    }
+    Ok(p::TurnInterruptResponse::default())
+}
+
+async fn run_event_pump(
+    state: Arc<ConnectionState>,
+    thread_id: String,
+    turn_id: String,
+    cwd: String,
+    handle: Arc<AgyProcessHandle>,
+    mut events_rx: broadcast::Receiver<AgyOutbound>,
+    started_at: i64,
+    user_input: Vec<p::UserInput>,
+) {
+    let mut translator = EventTranslatorState::new(thread_id.clone(), turn_id.clone(), cwd);
+    let mut recorded_items = vec![p::ThreadItem::UserMessage {
+        id: Uuid::now_v7().to_string(),
+        content: user_input,
+    }];
+    let mut terminal_seen = false;
+    let mut final_turn_status = p::TurnStatus::Completed;
+    let mut final_error = None;
+
+    loop {
+        if handle.is_interrupted() {
+            break;
+        }
+
+        let event = match events_rx.recv().await {
+            Ok(ev) => ev,
+            Err(broadcast::error::RecvError::Lagged(n)) => {
+                tracing::warn!(thread_id = %thread_id, turn_id = %turn_id, "agy event pump lagged by {n}");
+                continue;
+            }
+            Err(broadcast::error::RecvError::Closed) => {
+                tracing::debug!(thread_id = %thread_id, "agy stdout closed");
+                break;
+            }
+        };
+
+        if matches!(event, AgyOutbound::Result { .. }) {
+            terminal_seen = true;
+        }
+
+        let notifications = translator.translate(event);
+        for notif in notifications {
+            if let p::ServerNotification::ItemCompleted(ref n) = notif {
+                recorded_items.push(n.item.clone());
+                state.record_or_update_turn(
+                    &thread_id,
+                    RecordedTurn {
+                        turn_id: turn_id.clone(),
+                        started_at,
+                        completed_at: None,
+                        status: p::TurnStatus::InProgress,
+                        error: None,
+                        items: recorded_items.clone(),
+                    },
+                );
+            }
+            if let p::ServerNotification::TurnCompleted(ref n) = notif {
+                final_turn_status = n.turn.status;
+                final_error = n.turn.error.clone();
+            }
+
+            let method = notif_method(&notif);
+            if state.should_emit(method) {
+                state.send(notification_frame(notif));
+            }
+        }
+
+        if terminal_seen || handle.is_interrupted() {
+            break;
+        }
+    }
+
+    if handle.is_interrupted() {
+        tracing::debug!(thread_id = %thread_id, turn_id = %turn_id, "run_event_pump: handle was interrupted; exiting without duplicate completion");
+        return;
+    }
+
+    let completed_at = now_unix_millis();
+    let duration_ms = completed_at.saturating_sub(started_at);
+
+    state.record_or_update_turn(
+        &thread_id,
+        RecordedTurn {
+            turn_id: turn_id.clone(),
+            started_at,
+            completed_at: Some(completed_at),
+            status: final_turn_status,
+            error: final_error,
+            items: recorded_items,
+        },
+    );
+
+    state.agy_pool().mark_idle(&thread_id).await;
+
+    if !terminal_seen && state.should_emit("turn/completed") {
+        let turn = p::Turn {
+            id: turn_id,
+            items: Vec::new(),
+            items_view: p::default_items_view(),
+            status: p::TurnStatus::Completed,
+            error: None,
+            started_at: Some(started_at),
+            completed_at: Some(completed_at),
+            duration_ms: Some(duration_ms),
+        };
+        state.send(notification_frame(p::ServerNotification::TurnCompleted(
+            p::TurnCompletedNotification {
+                thread_id,
+                turn,
+            },
+        )));
+    }
+}
+
+fn notification_frame(notif: p::ServerNotification) -> p::JsonRpcMessage {
+    let value = serde_json::to_value(&notif).expect("ServerNotification serializes");
+    let method = value
+        .get("method")
+        .and_then(|m| m.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let params = value.get("params").cloned();
+    p::JsonRpcMessage::Notification(p::JsonRpcNotification {
+        jsonrpc: p::JsonRpcVersion,
+        method,
+        params,
+    })
+}
+
+fn notif_method(notif: &p::ServerNotification) -> &'static str {
+    match notif {
+        p::ServerNotification::ItemStarted(_) => "item/started",
+        p::ServerNotification::ItemCompleted(_) => "item/completed",
+        p::ServerNotification::AgentMessageDelta(_) => "item/agentMessage/delta",
+        p::ServerNotification::CommandExecutionOutputDelta(_) => "item/commandExecution/outputDelta",
+        p::ServerNotification::ThreadTokenUsageUpdated(_) => "thread/tokenUsage/updated",
+        p::ServerNotification::TurnStarted(_) => "turn/started",
+        p::ServerNotification::TurnCompleted(_) => "turn/completed",
+        _ => "notification",
+    }
+}
+
+fn now_unix_millis() -> i64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}

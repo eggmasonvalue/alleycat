@@ -65,6 +65,7 @@ pub struct AgentsConfig {
     pub hermes: HermesAgentConfig,
     pub devin: DevinAgentConfig,
     pub grok: GrokAgentConfig,
+    pub agy: AgyAgentConfig,
     pub shell: ShellAgentConfig,
 }
 
@@ -262,6 +263,30 @@ impl Default for GrokAgentConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
+pub struct AgyAgentConfig {
+    pub enabled: bool,
+    pub bin: String,
+    pub agent: Option<String>,
+    pub dangerously_skip_permissions: bool,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+}
+
+impl Default for AgyAgentConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            bin: "agy".to_string(),
+            agent: None,
+            dangerously_skip_permissions: true,
+            model: None,
+            effort: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
 pub struct ShellAgentConfig {
     pub enabled: bool,
     pub shell_bin: String,
@@ -398,6 +423,9 @@ mod tests {
             config.agents.grok.reasoning_effort.as_deref(),
             Some("medium")
         );
+        assert!(config.agents.agy.enabled);
+        assert_eq!(config.agents.agy.bin, "agy");
+        assert!(config.agents.agy.dangerously_skip_permissions);
         assert!(config.agents.shell.enabled);
     }
 }
